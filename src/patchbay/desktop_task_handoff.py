@@ -2,7 +2,7 @@
 
 The Desktop task bridge normally leaves archive state to the operator.  An
 operator may explicitly opt a private alias into this adapter when the
-configured Codex app-server socket is the Desktop-owned app-server.  The
+configured Codex app-server socket is the private app-server used for the
 adapter uses the versioned app-server JSON-RPC protocol over its Unix
 WebSocket and never exposes the socket path or underlying thread id.
 """

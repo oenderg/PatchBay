@@ -577,7 +577,7 @@ def _public_error(code: str) -> str:
             "then retry with a new receipt_id."
         ),
         "desktop_handoff_failed": (
-            "Automatic Desktop handoff failed. Inspect the local Codex Desktop app-server, then retry with a new receipt_id."
+            "Automatic Desktop handoff failed. Inspect the local Codex app-server, then retry with a new receipt_id."
         ),
         "desktop_handoff_incomplete": (
             "The previous automatic Desktop handoff did not finish. Recover the task in Desktop or restart the local "

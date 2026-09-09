@@ -17,9 +17,13 @@ characters, hard cap 16,000). This private per-alias limit lets long,
 human-readable engineering briefs pass the public MCP schema while an
 operator can keep a particular alias lower.
 
-Targets use `handoff_mode: manual` by default. An operator who has verified
-that a private `app_server_socket` belongs to the same Codex Desktop app-server
-may set `handoff_mode: app_server` and provide that absolute Unix socket path.
+Targets use `handoff_mode: manual` by default. An operator who has provisioned
+a private Codex app-server with the same Codex home and task store may set
+`handoff_mode: app_server` and provide that absolute Unix socket path. The
+supported local setup is `codex app-server --listen unix://` under a supervisor
+such as launchd; this gives PatchBay a stable app-server control socket while
+the Desktop app remains the transcript viewer. The Desktop app's own Electron
+IPC socket is not an app-server endpoint and must not be configured here.
 PatchBay then uses the official app-server WebSocket methods
 `thread/archive`, `thread/unarchive`, and `thread/read` to release the writer
 and verify `idle` or `notLoaded` readiness before scheduling the CLI turn. The
@@ -28,7 +32,9 @@ it does not discover sockets, expose the path, or fall back to CLI archive or
 unarchive commands. A missing socket, active final status, protocol failure,
 or interrupted handoff produces a durable failed receipt and requires a new
 receipt after local recovery. Manual Desktop handoff remains the compatible
-fallback when no Desktop-owned app-server socket is configured.
+fallback when no supervised Codex app-server socket is configured. The socket
+path is private runtime configuration; if the supervisor or Codex installation
+changes it, update the private targets file atomically and restart PatchBay.
 
 Targets default to `output_format: structured`. Set that private field to
 `markdown` when the Desktop transcript should show the model's ordinary
@@ -48,7 +54,7 @@ manual alias, before a turn use this sequence in Desktop:
 4. Call `codex_desktop_task_start` with a new `receipt_id`.
 
 PatchBay never edits session files. For `handoff_mode: app_server`, the same
-archive/unarchive sequence is requested through the private Desktop app-server
+archive/unarchive sequence is requested through the private Codex app-server
 and PatchBay verifies the resulting status before the CLI starts. For manual
 aliases, PatchBay never archives or unarchives a task.
 Opening or navigating to the task for inspection is allowed, but sending a
