@@ -82,7 +82,10 @@ the manual Desktop archive/unarchive handoff described in
 Targets may set the private `output_format` to `markdown` for a normal
 Markdown response in the visible Desktop task. The status tool returns that
 sanitized report in bounded chunks; use `report_offset` and `report_limit` for
-later chunks.
+later chunks. The public prompt schema allows up to 16,000 Unicode characters;
+the default private alias limit is 12,000 and can be lowered per target. Start
+waits up to three seconds for an immediate CLI startup failure before leaving
+a healthy long turn asynchronous.
 
 OpenAI's Apps SDK docs describe the ChatGPT connector flow as: enable Developer Mode, create a connector, paste an HTTPS `/mcp` URL, then open a new chat and add the connector from the `+` / More menu. References:
 

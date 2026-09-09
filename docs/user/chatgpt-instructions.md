@@ -12,8 +12,11 @@ When the operator explicitly enables the experimental Desktop task bridge,
 use `codex_desktop_task_start` and then `codex_desktop_task_status` for a
 pre-registered Desktop alias. The operator must complete the Desktop
 archive/unarchive handoff and leave the task idle/unloaded first. Start is a
-local durable receipt, not a normal named-worker call; status monitors the
-local process and returns the bounded answer when complete. On
+local durable receipt, not a normal named-worker call. Start waits only for a
+short local startup handshake: immediate writer/archive, missing-task, auth,
+or model failures are returned in the start receipt, while a genuinely running
+turn remains asynchronous. Status monitors the local process and returns the
+bounded answer when complete. On
 `active_writer` or `archived_thread`, recover the state in Desktop and retry
 with a new receipt id.
 For a completed receipt, use the status response's `report` and

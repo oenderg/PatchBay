@@ -31,7 +31,15 @@ from patchbay.workers.model_options import build_reasoning_config_override
 
 MAX_ALIAS_LENGTH = 80
 MAX_RECEIPT_LENGTH = 128
-MAX_PROMPT_LENGTH = 4_000
+# The MCP schema advertises the absolute cap so a target-specific private
+# limit cannot reject a human-readable brief before PatchBay sees it. Each
+# alias may choose a lower limit in the private targets file.
+MAX_PROMPT_LENGTH_CAP = 16_000
+DEFAULT_PROMPT_LENGTH = 12_000
+# Compatibility name for callers that imported the old limit. It now means
+# the default per-target limit; MAX_PROMPT_LENGTH_CAP is the hard public cap.
+MAX_PROMPT_LENGTH = DEFAULT_PROMPT_LENGTH
+MIN_PROMPT_LENGTH = 1_000
 MAX_ANSWER_LENGTH = 12_000
 # Reports are persisted after sanitization.  The cap is deliberately larger
 # than the default response chunk so callers can reassemble a useful report
@@ -43,6 +51,9 @@ MAX_TIMEOUT_MS = 24 * 60 * 60 * 1_000
 DEFAULT_TIMEOUT_MS = 30 * 60 * 1_000
 DEFAULT_RETENTION_HOURS = 24
 MAX_RETENTION_HOURS = 7 * 24
+DEFAULT_START_HANDSHAKE_MS = 3_000
+MAX_START_HANDSHAKE_MS = 10_000
+MIN_START_HANDSHAKE_MS = 100
 
 DESKTOP_TASK_MARKER = "_desktop_task"
 DESKTOP_TASK_ALIAS_OPTION = "_desktop_task_alias"
@@ -81,6 +92,7 @@ class DesktopTaskTarget:
     profile: str = ""
     skip_git_repo_check: bool = False
     output_format: str = "structured"
+    max_prompt_length: int = DEFAULT_PROMPT_LENGTH
 
 
 @dataclasses.dataclass(frozen=True)
@@ -92,6 +104,7 @@ class DesktopTaskOptions:
     profile: str = ""
     skip_git_repo_check: bool = False
     output_format: str = "structured"
+    max_prompt_length: int = DEFAULT_PROMPT_LENGTH
 
 
 def _text(value: Any, *, field: str, maximum: int, required: bool = True) -> str:
@@ -162,6 +175,16 @@ def _output_format(value: Any) -> str:
     return result
 
 
+def _prompt_length(value: Any) -> int:
+    return _bounded_int(
+        value,
+        field="max_prompt_length",
+        default=DEFAULT_PROMPT_LENGTH,
+        minimum=MIN_PROMPT_LENGTH,
+        maximum=MAX_PROMPT_LENGTH_CAP,
+    )
+
+
 def _cwd(value: Any) -> str:
     result = _text(value, field="cwd", maximum=1_024, required=False).strip()
     if not result:
@@ -227,6 +250,7 @@ def _target(alias: str, value: Any) -> DesktopTaskTarget:
         profile=_profile(value.get("profile", "")),
         skip_git_repo_check=_bool(value.get("skip_git_repo_check", False), "skip_git_repo_check"),
         output_format=_output_format(value.get("output_format", "structured")),
+        max_prompt_length=_prompt_length(value.get("max_prompt_length")),
     )
 
 
@@ -273,6 +297,13 @@ def desktop_tasks_enabled(config: Mapping[str, Any]) -> bool:
             default=DEFAULT_RETENTION_HOURS,
             minimum=1,
             maximum=MAX_RETENTION_HOURS,
+        )
+        _bounded_int(
+            settings.get("startup_handshake_ms"),
+            field="desktop_tasks.startup_handshake_ms",
+            default=DEFAULT_START_HANDSHAKE_MS,
+            minimum=MIN_START_HANDSHAKE_MS,
+            maximum=MAX_START_HANDSHAKE_MS,
         )
         _codex_bin(settings.get("codex_bin", "codex"))
         load_desktop_targets(_validated_targets_path(settings.get("targets_file")))
@@ -519,6 +550,7 @@ class DesktopTaskClient:
         codex_bin: str = "codex",
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         retention_hours: int = DEFAULT_RETENTION_HOURS,
+        startup_handshake_ms: int = DEFAULT_START_HANDSHAKE_MS,
     ):
         self.config = config
         self.job_manager = job_manager
@@ -543,6 +575,13 @@ class DesktopTaskClient:
             default=DEFAULT_RETENTION_HOURS,
             minimum=1,
             maximum=MAX_RETENTION_HOURS,
+        )
+        self.startup_handshake_ms = _bounded_int(
+            startup_handshake_ms,
+            field="desktop_tasks.startup_handshake_ms",
+            default=DEFAULT_START_HANDSHAKE_MS,
+            minimum=MIN_START_HANDSHAKE_MS,
+            maximum=MAX_START_HANDSHAKE_MS,
         )
         configured_repo = (config.get("repositories") or {}).get("default")
         self._private_output_values = tuple(
@@ -579,6 +618,13 @@ class DesktopTaskClient:
             minimum=1,
             maximum=MAX_RETENTION_HOURS,
         )
+        startup_handshake_ms = _bounded_int(
+            settings.get("startup_handshake_ms"),
+            field="desktop_tasks.startup_handshake_ms",
+            default=DEFAULT_START_HANDSHAKE_MS,
+            minimum=MIN_START_HANDSHAKE_MS,
+            maximum=MAX_START_HANDSHAKE_MS,
+        )
         client = cls(
             config,
             job_manager,
@@ -587,6 +633,7 @@ class DesktopTaskClient:
             codex_bin=_codex_bin(settings.get("codex_bin", "codex")),
             timeout_ms=timeout_ms,
             retention_hours=retention_hours,
+            startup_handshake_ms=startup_handshake_ms,
         )
         client.prune_expired()
         return client
@@ -745,6 +792,7 @@ class DesktopTaskClient:
             "json_events": True,
             "skip_git_repo_check": target.skip_git_repo_check,
             DESKTOP_TASK_OUTPUT_FORMAT_OPTION: target.output_format,
+            "_desktop_task_max_prompt_length": target.max_prompt_length,
             "config_overrides": overrides,
             DESKTOP_TASK_MARKER: True,
             DESKTOP_TASK_ALIAS_OPTION: alias,
@@ -763,6 +811,7 @@ class DesktopTaskClient:
             profile=target.profile,
             skip_git_repo_check=target.skip_git_repo_check,
             output_format=target.output_format,
+            max_prompt_length=target.max_prompt_length,
         )
         digest = _request_digest(alias, prompt, options, timeout_ms)
         with self._lock:
@@ -816,10 +865,10 @@ class DesktopTaskClient:
     async def start(self, *, target: Any, receipt_id: Any, prompt: Any, timeout_ms: Any = None) -> dict[str, Any]:
         alias = _alias(target)
         receipt = _receipt(receipt_id)
-        message = _text(prompt, field="prompt", maximum=MAX_PROMPT_LENGTH)
         target_record = self.targets.get(alias)
         if target_record is None:
             raise DesktopTaskError("target alias is not allowlisted")
+        message = _text(prompt, field="prompt", maximum=target_record.max_prompt_length)
         bounded_timeout = _bounded_int(
             timeout_ms,
             field="timeout_ms",
@@ -836,11 +885,48 @@ class DesktopTaskClient:
             bounded_timeout,
         )
         try:
-            self.job_executor.schedule_job(job.job_id)
-        except Exception as exc:
+            scheduled = self.job_executor.schedule_job(job.job_id)
+        except Exception:
             self.job_manager.update_job_state(job.job_id, JobState.FAILED, error="PatchBay could not schedule the Desktop task turn.")
-            raise DesktopTaskError("PatchBay could not schedule the Desktop task turn") from exc
+            failed = self.job_manager.get_job(job.job_id) or job
+            return self._public(failed, target_record)
+        # Real JobExecutor.schedule_job returns an asyncio.Task. A small
+        # bounded handshake lets immediate CLI failures (writer, archive,
+        # missing task, auth, model) come back as a terminal receipt while a
+        # genuinely running turn remains asynchronous. Test/dry-run
+        # executors may return None and retain the immediate path.
+        if isinstance(scheduled, asyncio.Future):
+            job = await self._start_handshake(job, scheduled)
         return self._public(job, target_record)
+
+    async def _start_handshake(self, job: JobInfo, scheduled: asyncio.Future) -> JobInfo:
+        deadline = asyncio.get_running_loop().time() + self.startup_handshake_ms / 1_000
+        while True:
+            current = self.job_manager.get_job(job.job_id) or job
+            if current.state not in {JobState.PENDING, JobState.RUNNING}:
+                return current
+            if scheduled.done():
+                # Retrieve the exception so a crashed task is not left as an
+                # unobserved future. A well-behaved executor has already
+                # persisted a terminal state; only convert a task crash with
+                # no durable transition into a receipt failure.
+                try:
+                    scheduled.exception()
+                except BaseException:
+                    pass
+                current = self.job_manager.get_job(job.job_id) or current
+                if current.state in {JobState.PENDING, JobState.RUNNING}:
+                    self.job_manager.update_job_state(
+                        job.job_id,
+                        JobState.FAILED,
+                        error="PatchBay's Desktop task executor stopped before a terminal result was persisted.",
+                    )
+                    current = self.job_manager.get_job(job.job_id) or current
+                return current
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return current
+            await asyncio.sleep(min(0.05, remaining))
 
     async def status(
         self,
@@ -907,6 +993,10 @@ __all__ = [
     "MAX_REPORT_CHUNK_LENGTH",
     "MAX_REPORT_LENGTH",
     "MAX_ALIAS_LENGTH",
+    "MAX_PROMPT_LENGTH_CAP",
+    "DEFAULT_PROMPT_LENGTH",
+    "DEFAULT_START_HANDSHAKE_MS",
+    "MAX_START_HANDSHAKE_MS",
     "MAX_PROMPT_LENGTH",
     "MAX_RECEIPT_LENGTH",
     "build_desktop_resume_command",

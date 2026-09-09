@@ -133,7 +133,7 @@ It is especially useful when you:
 | **Artifacts** | Import ChatGPT-generated files or zip packages into worker context |
 | **Repository boundary** | Allowed roots, path guard, tokenized public access, tool modes, and mutation locks |
 | **Advanced loops** | Pro Escalation requests, local handoff scripts, Codex job control, review jobs, resume/interactive flows |
-| **Experimental Desktop continuation** | Opt-in alias-only durable receipts for a manually handed-off Codex Desktop task; see [the Desktop task bridge](docs/worker-bridge/desktop-task-bridge.md) |
+| **Experimental Desktop continuation** | Opt-in alias-only durable receipts for a manually handed-off Codex Desktop task, with bounded startup failure reporting and paged reports; see [the Desktop task bridge](docs/worker-bridge/desktop-task-bridge.md) |
 
 The full public tool surface is documented in [docs/reference/public-tool-surface.md](docs/reference/public-tool-surface.md). Additional operational details moved out of the root README are in [docs/reference/tool-surface-and-worker-details.md](docs/reference/tool-surface-and-worker-details.md).
 

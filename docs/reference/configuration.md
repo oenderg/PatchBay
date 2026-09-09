@@ -59,9 +59,16 @@ desktop_tasks:
   codex_bin: codex
   timeout_ms: 1800000
   retention_hours: 24
+  # Wait this long for immediate CLI startup failures before returning a
+  # queued/running receipt. Safe range: 100..10000 ms; default: 3000.
+  startup_handshake_ms: 3000
   # structured preserves the machine-readable result contract. markdown
   # leaves the final Desktop agent message as ordinary Markdown.
   # output_format: structured
+
+# In the private targets JSON, max_prompt_length defaults to 12000 Unicode
+# characters and is capped at 16000. It is per alias; the public MCP schema
+# advertises only the 16000-character hard cap.
 
 # Sanitized Desktop reports are capped at 200,000 Unicode characters. Status
 # returns at most 12,000 characters per report chunk; use report_offset and

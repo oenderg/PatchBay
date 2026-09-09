@@ -15,6 +15,7 @@ from patchbay.desktop_tasks import (
     DesktopTaskOptions,
     DesktopTaskTarget,
     MAX_REPORT_LENGTH,
+    MAX_PROMPT_LENGTH_CAP,
     build_desktop_resume_command,
     desktop_tasks_enabled,
     load_desktop_targets,
@@ -142,9 +143,14 @@ def test_public_surface_is_desktop_named_and_opt_in(tmp_path: Path):
         "idempotentHint": True,
     }
     assert "thread_id" not in by_name[DESKTOP_TASK_START_TOOL_NAME]["inputSchema"]["properties"]
+    assert by_name[DESKTOP_TASK_START_TOOL_NAME]["inputSchema"]["properties"]["prompt"]["maxLength"] == MAX_PROMPT_LENGTH_CAP
     validate_public_tool_arguments(
         DESKTOP_TASK_START_TOOL_NAME,
         {"target": "MTP Luna", "receipt_id": "web-1", "prompt": "Continue."},
+    )
+    validate_public_tool_arguments(
+        DESKTOP_TASK_START_TOOL_NAME,
+        {"target": "MTP Luna", "receipt_id": "web-long", "prompt": "x" * 4_175},
     )
     with pytest.raises(ValueError, match="Unknown argument 'thread_id'"):
         validate_public_tool_arguments(
@@ -188,6 +194,46 @@ def test_desktop_target_output_format_defaults_and_is_strict(tmp_path: Path):
     path.chmod(0o600)
     with pytest.raises(DesktopTaskError, match="output_format is unsupported"):
         load_desktop_targets(path)
+
+
+def test_desktop_target_prompt_limit_defaults_and_stays_within_global_cap(tmp_path: Path):
+    path = tmp_path / "targets.json"
+    write_targets(path)
+    assert load_desktop_targets(path)["MTP Luna"].max_prompt_length == 12_000
+
+    path.write_text(
+        json.dumps(
+            {
+                "targets": {
+                    "MTP Luna": {
+                        "thread_id": PRIVATE_THREAD_ID,
+                        "max_prompt_length": 5_000,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    assert load_desktop_targets(path)["MTP Luna"].max_prompt_length == 5_000
+
+    # Private operator configuration is bounded even if it requests more than
+    # the public schema can carry.
+    path.write_text(
+        json.dumps(
+            {
+                "targets": {
+                    "MTP Luna": {
+                        "thread_id": PRIVATE_THREAD_ID,
+                        "max_prompt_length": MAX_PROMPT_LENGTH_CAP + 1,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    assert load_desktop_targets(path)["MTP Luna"].max_prompt_length == MAX_PROMPT_LENGTH_CAP
 
 
 def test_desktop_catalog_requires_a_valid_private_targets_file(tmp_path: Path):
@@ -310,6 +356,89 @@ async def test_start_returns_queued_quickly_and_enforces_receipt_and_target_idem
     job = manager.get_job(executor.scheduled[0])
     assert job is not None
     assert PRIVATE_THREAD_ID in json.dumps(job.options)
+
+
+@pytest.mark.asyncio
+async def test_start_accepts_human_sized_prompt_and_preserves_target_limit_in_receipt(tmp_path):
+    _config, manager, executor, client = make_client(tmp_path)
+    client.targets["MTP Luna"] = make_target(max_prompt_length=5_000)
+    prompt = "x" * 4_175
+
+    started = await client.start(target="MTP Luna", receipt_id="long-1", prompt=prompt)
+
+    assert started["state"] == "queued"
+    job = manager.get_job(executor.scheduled[0])
+    assert job is not None
+    assert job.options["_desktop_task_max_prompt_length"] == 5_000
+
+    client.targets["MTP Luna"] = make_target(max_prompt_length=4_000)
+    with pytest.raises(DesktopTaskError, match="prompt is too long"):
+        await client.start(target="MTP Luna", receipt_id="long-2", prompt=prompt)
+
+
+class HandshakeExecutor:
+    def __init__(self, manager, *, outcome: str):
+        self.manager = manager
+        self.outcome = outcome
+        self.tasks = []
+
+    def schedule_job(self, job_id):
+        async def run():
+            await asyncio.sleep(0)
+            if self.outcome == "failed":
+                self.manager.update_job_state(
+                    job_id,
+                    JobState.FAILED,
+                    error="Desktop still has an active writer",
+                    result={"failure_diagnostic": {"category": "active_writer"}},
+                )
+                return
+            self.manager.update_job_state(job_id, JobState.RUNNING)
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(run())
+        self.tasks.append(task)
+        return task
+
+
+@pytest.mark.asyncio
+async def test_start_handshake_surfaces_immediate_writer_failure(tmp_path):
+    config, manager, _unused, _unused_client = make_client(tmp_path)
+    executor = HandshakeExecutor(manager, outcome="failed")
+    client = DesktopTaskClient(
+        config,
+        manager,
+        executor,
+        {"MTP Luna": make_target()},
+        startup_handshake_ms=1_000,
+    )
+
+    started = await client.start(target="MTP Luna", receipt_id="handshake-fail", prompt="Continue.")
+
+    assert started["state"] == "failed"
+    assert started["error_code"] == "active_writer"
+    assert "new receipt_id" in started["error"]
+
+
+@pytest.mark.asyncio
+async def test_start_handshake_leaves_genuinely_running_turn_async(tmp_path):
+    config, manager, _unused, _unused_client = make_client(tmp_path)
+    executor = HandshakeExecutor(manager, outcome="running")
+    client = DesktopTaskClient(
+        config,
+        manager,
+        executor,
+        {"MTP Luna": make_target()},
+        startup_handshake_ms=250,
+    )
+
+    started = await client.start(target="MTP Luna", receipt_id="handshake-running", prompt="Continue.")
+
+    assert started["state"] == "running"
+    assert started["ok"] is False
+    for task in executor.tasks:
+        task.cancel()
+    await asyncio.gather(*executor.tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio

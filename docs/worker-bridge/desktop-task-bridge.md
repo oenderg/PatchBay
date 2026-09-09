@@ -12,6 +12,11 @@ targets are configured. Each underlying Desktop task id may appear only once
 in that file. A target entry contains the private Desktop task id and may pin its cwd, model, reasoning effort,
 sandbox, profile, and `skip_git_repo_check`. Do not commit the targets file.
 
+Each target may also set `max_prompt_length` (default 12,000 Unicode
+characters, hard cap 16,000). This private per-alias limit lets long,
+human-readable engineering briefs pass the public MCP schema while an
+operator can keep a particular alias lower.
+
 Targets default to `output_format: structured`. Set that private field to
 `markdown` when the Desktop transcript should show the model's ordinary
 Markdown final response. Markdown mode keeps `--json` lifecycle events but
@@ -76,9 +81,14 @@ while its server is unreachable.
 
 ## Receipt lifecycle
 
-`codex_desktop_task_start` returns promptly with `queued` or `running`. Read
-progress with `codex_desktop_task_status`; status is local process/job
-monitoring and does not ask a model to poll. A receipt becomes `completed` when
+`codex_desktop_task_start` performs a bounded 3-second local startup handshake.
+If the CLI reaches an immediate terminal startup failure, such as
+`active_writer`, `archived_thread`, a missing task, authentication failure, or
+model rejection, the start response is already a failed durable receipt with
+the actionable error code. A healthy turn returns `queued` or `running` and
+continues asynchronously after the handshake. Read progress with
+`codex_desktop_task_status`; status is local process/job monitoring and does
+not ask a model to poll. A receipt becomes `completed` when
 PatchBay has persisted a semantic Codex answer, including the case where a
 wrapper exits nonzero after `turn.completed` or an equivalent session terminal
 event. That result includes a `wrapper_exit_after_answer` warning. If process

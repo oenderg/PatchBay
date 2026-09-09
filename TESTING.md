@@ -34,7 +34,8 @@ PYTHONDONTWRITEBYTECODE=1 python scripts/external_chatgpt_style_validation.py --
 ```
 
 The opt-in Desktop task bridge has focused coverage for alias/configuration
-privacy, durable receipt restart/recovery, idempotency, semantic completion
+privacy, durable receipt restart/recovery, idempotency, per-alias prompt
+limits, startup failure handshakes, semantic completion
 after a nonzero wrapper exit, writer/archive failure classification, and the
 public tool surface:
 

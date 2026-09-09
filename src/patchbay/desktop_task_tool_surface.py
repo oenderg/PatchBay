@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict
 
-from patchbay.desktop_tasks import desktop_tasks_enabled
+from patchbay.desktop_tasks import MAX_PROMPT_LENGTH_CAP, desktop_tasks_enabled
 
 
 DESKTOP_TASK_START_TOOL_NAME = "codex_desktop_task_start"
@@ -55,8 +55,10 @@ DESKTOP_TASK_START_TOOL: Dict[str, Any] = {
     "name": DESKTOP_TASK_START_TOOL_NAME,
     "description": (
         "Experimental mutating/open-world bridge for a pre-registered Codex Desktop task. "
-        "Use only after explicit user intent and a manual Desktop handoff. Start returns immediately "
-        "with a queued or running receipt; use codex_desktop_task_status for local progress and the bounded final answer. "
+        "Use only after explicit user intent and a manual Desktop handoff. Start returns a queued or running receipt "
+        "for a healthy handoff, or surfaces an immediate startup failure (such as active_writer, archived_thread, "
+        "missing task, auth, or model rejection) during a short bounded handshake; use codex_desktop_task_status "
+        "for local progress and the bounded final answer. "
         "The operator must archive the task in Desktop, unarchive it in Desktop, then leave it idle/unloaded before starting. "
         "Desktop remains the transcript viewer. PatchBay never archives, unarchives, or edits session files. "
         "active_writer and archived_thread failures require Desktop recovery and a new receipt_id. "
@@ -69,7 +71,11 @@ DESKTOP_TASK_START_TOOL: Dict[str, Any] = {
             **_COMMON_TARGET_PROPERTIES,
             "prompt": {
                 "type": "string",
-                "description": "Bounded natural-language prompt for the next Desktop task turn.",
+                "maxLength": MAX_PROMPT_LENGTH_CAP,
+                "description": (
+                    "Bounded natural-language prompt for the next Desktop task turn. "
+                    "The private alias may impose a lower configured limit."
+                ),
             },
             "timeout_ms": {
                 "type": "integer",

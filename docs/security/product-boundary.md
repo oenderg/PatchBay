@@ -36,7 +36,10 @@ targets file is private and maps human aliases to private Desktop session
 settings. Public calls cannot supply raw task ids, paths, model/profile values,
 or arbitrary commands. Desktop remains the owner of archive state and the
 transcript viewer; PatchBay starts and monitors only the bounded local CLI
-turn, and reports active-writer or stale-archive recovery as a failed receipt.
+turn. Start applies a private per-alias prompt limit (12,000 Unicode
+characters by default, 16,000 hard cap) and a short local startup handshake so
+immediate active-writer, stale-archive, missing-task, auth, or model failures
+are returned as failed receipts rather than appearing queued.
 Completed Desktop reports are sanitized before being stored: paths below the
 configured target workspace are made repository-relative, other local paths,
 configured private values, secret-like content, and internal UUIDs are

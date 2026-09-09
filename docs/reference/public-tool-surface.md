@@ -132,8 +132,10 @@ These tools are absent unless `desktop_tasks.enabled` is explicitly true and
 the configured absolute, existing regular targets file passes the private
 mode-0600 check and contains valid unique aliases/task ids. They
 continue a pre-existing Desktop task through a durable local CLI receipt. The
-start tool is mutating/open-world/non-idempotent and returns quickly; the
-status tool is read-only/idempotent and reads local process state. Both accept
+start tool is mutating/open-world/non-idempotent and performs a bounded
+three-second startup handshake: immediate CLI failures are returned as failed
+receipts, while a healthy long turn remains asynchronous. The status tool is
+read-only/idempotent and reads local process state. Both accept
 only a human alias and receipt id. PatchBay never archives, unarchives, edits
 session files, exposes raw task ids, or returns unbounded or unstructured CLI
 output. A completed receipt may include `cleanup_pending` and a bounded
@@ -153,6 +155,9 @@ Responses also include `report_total_length`, `report_next_offset`,
 `report_complete`, and `report_capped`. Structured mode renders every schema
 field into the report so files, tests, risks, and follow-up details are not
 silently omitted.
+
+The public start schema accepts at most 16,000 Unicode characters. A private
+target may set `max_prompt_length` to a lower value; the default is 12,000.
 
 | Tool | Mutability | Role |
 | --- | --- | --- |
