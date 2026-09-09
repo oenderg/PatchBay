@@ -66,6 +66,15 @@ desktop_tasks:
   # leaves the final Desktop agent message as ordinary Markdown.
   # output_format: structured
 
+# Optional private target fields in desktop-task-targets.json:
+#   "handoff_mode": "manual"          # default; Desktop archive -> unarchive is operator-driven
+#   "handoff_mode": "app_server"      # opt-in official app-server handoff
+#   "app_server_socket": "/private/path/to/Desktop/app-server.sock"
+# app_server mode requires an absolute Unix socket path owned by the same
+# Desktop app-server. PatchBay does not discover sockets or use CLI archive /
+# unarchive fallbacks, and a failed or interrupted handoff requires a new
+# receipt after local recovery.
+
 # In the private targets JSON, max_prompt_length defaults to 12000 Unicode
 # characters and is capped at 16000. It is per alias; the public MCP schema
 # advertises only the 16000-character hard cap.

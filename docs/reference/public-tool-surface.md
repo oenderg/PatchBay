@@ -136,9 +136,12 @@ start tool is mutating/open-world/non-idempotent and performs a bounded
 three-second startup handshake: immediate CLI failures are returned as failed
 receipts, while a healthy long turn remains asynchronous. The status tool is
 read-only/idempotent and reads local process state. Both accept
-only a human alias and receipt id. PatchBay never archives, unarchives, edits
-session files, exposes raw task ids, or returns unbounded or unstructured CLI
-output. A completed receipt may include `cleanup_pending` and a bounded
+only a human alias and receipt id. Manual aliases require the Desktop-native
+archive/unarchive handoff; a private alias may instead opt into the official
+Codex app-server archive/unarchive/read sequence through a mode-0600 private
+socket setting. PatchBay never edits session files, discovers sockets, or uses
+CLI archive/unarchive fallbacks. It exposes no raw task ids and returns no
+unbounded or unstructured CLI output. A completed receipt may include `cleanup_pending` and a bounded
 machine-readable cleanup warning when fail-closed process cleanup still needs
 operator recovery. The required Desktop handoff and active-writer/archive
 recovery are documented in

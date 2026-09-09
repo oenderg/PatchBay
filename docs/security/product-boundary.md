@@ -28,7 +28,7 @@ The goal is maximum useful capability with explicit control.
 | Handoff watcher | Plan becomes local execution | Explicit local command, dry-run, status artifacts |
 | Public tunnel | Internet-exposed MCP endpoint | Token required, no `--no-auth`, rotation, warnings |
 | Session history | Private transcript exposure | Default off, metadata first, bounded reads |
-| Codex Desktop task bridge | Continue a pre-existing Desktop task through local CLI | Explicit opt-in, private alias allowlist, mode-0600 targets, manual Desktop writer/archive handoff, bounded receipts, no session-file/archive mutation |
+| Codex Desktop task bridge | Continue a pre-existing Desktop task through local CLI | Explicit opt-in, private alias allowlist, mode-0600 targets, manual Desktop writer/archive handoff or a per-alias verified app-server handoff, bounded receipts, no session-file mutation |
 | Hub to Edge operations | Duplicate, stale, or cross-version effects | Durable idempotency, immutable attempt contracts, fencing tokens, payload hashes, lease reconciliation, and current-session authentication |
 
 The experimental Codex Desktop task bridge is a separate opt-in boundary. Its
@@ -36,7 +36,10 @@ targets file is private and maps human aliases to private Desktop session
 settings. Public calls cannot supply raw task ids, paths, model/profile values,
 or arbitrary commands. Desktop remains the owner of archive state and the
 transcript viewer; PatchBay starts and monitors only the bounded local CLI
-turn. Start applies a private per-alias prompt limit (12,000 Unicode
+turn. A private `handoff_mode: app_server` alias may request archive,
+unarchive, and idle/notLoaded verification only through its configured
+absolute Unix socket; socket discovery and CLI archive/unarchive fallbacks are
+disabled. Start applies a private per-alias prompt limit (12,000 Unicode
 characters by default, 16,000 hard cap) and a short local startup handshake so
 immediate active-writer, stale-archive, missing-task, auth, or model failures
 are returned as failed receipts rather than appearing queued.

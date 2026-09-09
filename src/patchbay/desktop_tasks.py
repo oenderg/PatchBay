@@ -17,13 +17,18 @@ import re
 import stat
 import threading
 import time
-from typing import Any, Mapping, Optional
+from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from patchbay.jobs.manager import (
     JobInfo,
     JobState,
     terminal_cleanup_pending,
     terminal_cleanup_recovery_required,
+)
+from patchbay.desktop_task_handoff import (
+    DEFAULT_HANDOFF_TIMEOUT_MS,
+    DesktopHandoffError,
+    prepare_desktop_task,
 )
 from patchbay.security import redact_local_paths, redact_text
 from patchbay.workers.model_options import build_reasoning_config_override
@@ -62,6 +67,10 @@ DESKTOP_TASK_DIGEST_OPTION = "_desktop_task_request_digest"
 DESKTOP_TASK_TIMEOUT_OPTION = "_desktop_task_timeout_ms"
 DESKTOP_TASK_CODEX_BIN_OPTION = "_desktop_task_codex_bin"
 DESKTOP_TASK_OUTPUT_FORMAT_OPTION = "_desktop_task_output_format"
+DESKTOP_TASK_HANDOFF_MODE_OPTION = "_desktop_task_handoff_mode"
+DESKTOP_TASK_HANDOFF_SOCKET_OPTION = "_desktop_task_handoff_socket"
+DESKTOP_TASK_HANDOFF_STATE_OPTION = "_desktop_task_handoff_state"
+DESKTOP_TASK_SCHEDULED_OPTION = "_desktop_task_scheduled"
 
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.: -]{0,79}$")
 _RECEIPT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -75,6 +84,7 @@ _SESSION_ID_RE = re.compile(
 _REASONING = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 _SANDBOXES = frozenset({"read-only", "workspace-write", "danger-full-access"})
 _OUTPUT_FORMATS = frozenset({"structured", "markdown"})
+_HANDOFF_MODES = frozenset({"manual", "app_server"})
 
 
 class DesktopTaskError(ValueError):
@@ -93,6 +103,8 @@ class DesktopTaskTarget:
     skip_git_repo_check: bool = False
     output_format: str = "structured"
     max_prompt_length: int = DEFAULT_PROMPT_LENGTH
+    handoff_mode: str = "manual"
+    app_server_socket: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -104,6 +116,8 @@ class DesktopTaskOptions:
     profile: str = ""
     skip_git_repo_check: bool = False
     output_format: str = "structured"
+    handoff_mode: str = "manual"
+    app_server_socket: str = ""
 
 
 def _text(value: Any, *, field: str, maximum: int, required: bool = True) -> str:
@@ -174,6 +188,27 @@ def _output_format(value: Any) -> str:
     return result
 
 
+def _handoff_mode(value: Any) -> str:
+    result = _text(value, field="handoff_mode", maximum=16, required=False).strip().lower()
+    if not result:
+        return "manual"
+    if result not in _HANDOFF_MODES:
+        raise DesktopTaskError("handoff_mode is unsupported")
+    return result
+
+
+def _app_server_socket(value: Any, *, required: bool = False) -> str:
+    result = _text(value, field="app_server_socket", maximum=1_024, required=required).strip()
+    if not result:
+        return ""
+    path = Path(result).expanduser()
+    if not path.is_absolute():
+        raise DesktopTaskError("app_server_socket must be an absolute path")
+    if "\x00" in str(path):
+        raise DesktopTaskError("app_server_socket contains unsupported characters")
+    return str(path)
+
+
 def _prompt_length(value: Any) -> int:
     return _bounded_int(
         value,
@@ -239,7 +274,7 @@ def _target(alias: str, value: Any) -> DesktopTaskTarget:
         return DesktopTaskTarget(alias=alias, thread_id=_thread_id(value))
     if not isinstance(value, Mapping):
         raise DesktopTaskError("allowlist targets must be thread ids or objects")
-    return DesktopTaskTarget(
+    target = DesktopTaskTarget(
         alias=alias,
         thread_id=_thread_id(value.get("thread_id", value.get("session_id"))),
         cwd=_cwd(value.get("cwd", "")),
@@ -250,7 +285,16 @@ def _target(alias: str, value: Any) -> DesktopTaskTarget:
         skip_git_repo_check=_bool(value.get("skip_git_repo_check", False), "skip_git_repo_check"),
         output_format=_output_format(value.get("output_format", "structured")),
         max_prompt_length=_prompt_length(value.get("max_prompt_length")),
+        handoff_mode=_handoff_mode(value.get("handoff_mode", "manual")),
+        app_server_socket=_app_server_socket(value.get("app_server_socket", "")),
     )
+    if target.handoff_mode == "app_server" and not target.app_server_socket:
+        raise DesktopTaskError("app_server_socket is required for app_server handoff_mode")
+    if target.handoff_mode == "manual" and target.app_server_socket:
+        # Retain strict private configuration: a socket should never be
+        # silently ignored because an operator mistyped the handoff mode.
+        raise DesktopTaskError("app_server_socket requires app_server handoff_mode")
+    return target
 
 
 def load_desktop_targets(path: Path) -> dict[str, DesktopTaskTarget]:
@@ -528,6 +572,17 @@ def _public_error(code: str) -> str:
             "The configured Desktop task was not found. Update the private alias registration to the current "
             "Desktop task, restart PatchBay, then retry with a new receipt_id."
         ),
+        "desktop_handoff_unavailable": (
+            "Automatic Desktop handoff is unavailable. Ensure the configured private Codex app-server is running, "
+            "then retry with a new receipt_id."
+        ),
+        "desktop_handoff_failed": (
+            "Automatic Desktop handoff failed. Inspect the local Codex Desktop app-server, then retry with a new receipt_id."
+        ),
+        "desktop_handoff_incomplete": (
+            "The previous automatic Desktop handoff did not finish. Recover the task in Desktop or restart the local "
+            "bridge, then retry with a new receipt_id."
+        ),
         "codex_usage_limit": "Codex could not run the Desktop task because its current usage quota is exhausted.",
     }
     return messages.get(
@@ -550,6 +605,7 @@ class DesktopTaskClient:
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         retention_hours: int = DEFAULT_RETENTION_HOURS,
         startup_handshake_ms: int = DEFAULT_START_HANDSHAKE_MS,
+        handoff_runner: Optional[Callable[[str, str], Awaitable[None]]] = None,
     ):
         self.config = config
         self.job_manager = job_manager
@@ -582,6 +638,8 @@ class DesktopTaskClient:
             minimum=MIN_START_HANDSHAKE_MS,
             maximum=MAX_START_HANDSHAKE_MS,
         )
+        self._handoff_runner = handoff_runner or prepare_desktop_task
+        self._start_lock = asyncio.Lock()
         configured_repo = (config.get("repositories") or {}).get("default")
         self._private_output_values = tuple(
             value
@@ -791,6 +849,12 @@ class DesktopTaskClient:
             "json_events": True,
             "skip_git_repo_check": target.skip_git_repo_check,
             DESKTOP_TASK_OUTPUT_FORMAT_OPTION: target.output_format,
+            DESKTOP_TASK_HANDOFF_MODE_OPTION: target.handoff_mode,
+            DESKTOP_TASK_HANDOFF_SOCKET_OPTION: target.app_server_socket,
+            DESKTOP_TASK_HANDOFF_STATE_OPTION: (
+                "not_started" if target.handoff_mode == "app_server" else "manual"
+            ),
+            DESKTOP_TASK_SCHEDULED_OPTION: False,
             "_desktop_task_max_prompt_length": target.max_prompt_length,
             "config_overrides": overrides,
             DESKTOP_TASK_MARKER: True,
@@ -810,6 +874,8 @@ class DesktopTaskClient:
             profile=target.profile,
             skip_git_repo_check=target.skip_git_repo_check,
             output_format=target.output_format,
+            handoff_mode=target.handoff_mode,
+            app_server_socket=target.app_server_socket,
         )
         digest = _request_digest(alias, prompt, options, timeout_ms)
         with self._lock:
@@ -860,42 +926,111 @@ class DesktopTaskClient:
                 raise DesktopTaskError("PatchBay could not persist the Desktop task receipt")
             return job
 
-    async def start(self, *, target: Any, receipt_id: Any, prompt: Any, timeout_ms: Any = None) -> dict[str, Any]:
-        alias = _alias(target)
-        receipt = _receipt(receipt_id)
-        target_record = self.targets.get(alias)
-        if target_record is None:
-            raise DesktopTaskError("target alias is not allowlisted")
-        message = _text(prompt, field="prompt", maximum=target_record.max_prompt_length)
-        bounded_timeout = _bounded_int(
-            timeout_ms,
-            field="timeout_ms",
-            default=self.timeout_ms,
-            minimum=1_000,
-            maximum=self.timeout_ms,
+    def _set_handoff_state(self, job_id: str, state: str) -> JobInfo:
+        self.job_manager.mutate_job_options(
+            job_id,
+            lambda current: {
+                **current,
+                DESKTOP_TASK_HANDOFF_STATE_OPTION: state,
+            },
         )
-        job = await asyncio.to_thread(
-            self._create_job,
-            alias,
-            receipt,
-            message,
-            target_record,
-            bounded_timeout,
+        return self.job_manager.get_job(job_id) or JobInfo(job_id=job_id, state=JobState.FAILED)
+
+    def _fail_handoff(self, job: JobInfo, code: str) -> JobInfo:
+        self.job_manager.update_job_state(
+            job.job_id,
+            JobState.FAILED,
+            error=code,
+            result={"failure_diagnostic": {"category": code}},
         )
+        return self.job_manager.get_job(job.job_id) or job
+
+    async def _prepare_handoff(self, job: JobInfo, target: DesktopTaskTarget) -> JobInfo:
+        """Perform one durable, private app-server ownership handoff.
+
+        ``preparing`` is written before the first remote mutation.  If the
+        service dies after that point, a later retry with the same receipt is
+        terminally blocked rather than guessing whether archive/unarchive
+        completed.  A fresh receipt is required after operator recovery.
+        """
+        if target.handoff_mode != "app_server":
+            return job
+        state = str((job.options or {}).get(DESKTOP_TASK_HANDOFF_STATE_OPTION) or "not_started")
+        if state == "released":
+            return job
+        if state in {"preparing", "archived"}:
+            return self._fail_handoff(job, "desktop_handoff_incomplete")
+        if state not in {"", "not_started"}:
+            return self._fail_handoff(job, "desktop_handoff_incomplete")
         try:
-            scheduled = self.job_executor.schedule_job(job.job_id)
+            self._set_handoff_state(job.job_id, "preparing")
+            await self._handoff_runner(target.app_server_socket, target.thread_id)
+            return self._set_handoff_state(job.job_id, "released")
+        except DesktopHandoffError as error:
+            code = error.code if error.code in {
+                "active_writer",
+                "archived_thread",
+                "desktop_task_not_found",
+                "desktop_handoff_unavailable",
+                "desktop_handoff_failed",
+            } else "desktop_handoff_failed"
+            return self._fail_handoff(job, code)
         except Exception:
-            self.job_manager.update_job_state(job.job_id, JobState.FAILED, error="PatchBay could not schedule the Desktop task turn.")
-            failed = self.job_manager.get_job(job.job_id) or job
-            return self._public(failed, target_record)
-        # Real JobExecutor.schedule_job returns an asyncio.Task. A small
-        # bounded handshake lets immediate CLI failures (writer, archive,
-        # missing task, auth, model) come back as a terminal receipt while a
-        # genuinely running turn remains asynchronous. Test/dry-run
-        # executors may return None and retain the immediate path.
-        if isinstance(scheduled, asyncio.Future):
-            job = await self._start_handshake(job, scheduled)
-        return self._public(job, target_record)
+            return self._fail_handoff(job, "desktop_handoff_failed")
+
+    async def start(self, *, target: Any, receipt_id: Any, prompt: Any, timeout_ms: Any = None) -> dict[str, Any]:
+        async with self._start_lock:
+            alias = _alias(target)
+            receipt = _receipt(receipt_id)
+            target_record = self.targets.get(alias)
+            if target_record is None:
+                raise DesktopTaskError("target alias is not allowlisted")
+            message = _text(prompt, field="prompt", maximum=target_record.max_prompt_length)
+            bounded_timeout = _bounded_int(
+                timeout_ms,
+                field="timeout_ms",
+                default=self.timeout_ms,
+                minimum=1_000,
+                maximum=self.timeout_ms,
+            )
+            job = await asyncio.to_thread(
+                self._create_job,
+                alias,
+                receipt,
+                message,
+                target_record,
+                bounded_timeout,
+            )
+            # A durable terminal receipt is the idempotent result.  Never
+            # repeat its handoff or schedule a second Desktop turn.
+            if job.state not in {JobState.PENDING, JobState.RUNNING}:
+                return self._public(job, target_record)
+            if bool((job.options or {}).get(DESKTOP_TASK_SCHEDULED_OPTION)):
+                return self._public(job, target_record)
+            job = await self._prepare_handoff(job, target_record)
+            if job.state not in {JobState.PENDING, JobState.RUNNING}:
+                return self._public(job, target_record)
+            self.job_manager.mutate_job_options(
+                job.job_id,
+                lambda current: {
+                    **current,
+                    DESKTOP_TASK_SCHEDULED_OPTION: True,
+                },
+            )
+            try:
+                scheduled = self.job_executor.schedule_job(job.job_id)
+            except Exception:
+                self.job_manager.update_job_state(job.job_id, JobState.FAILED, error="PatchBay could not schedule the Desktop task turn.")
+                failed = self.job_manager.get_job(job.job_id) or job
+                return self._public(failed, target_record)
+            # Real JobExecutor.schedule_job returns an asyncio.Task. A small
+            # bounded handshake lets immediate CLI failures (writer, archive,
+            # missing task, auth, model) come back as a terminal receipt while a
+            # genuinely running turn remains asynchronous. Test/dry-run
+            # executors may return None and retain the immediate path.
+            if isinstance(scheduled, asyncio.Future):
+                job = await self._start_handshake(job, scheduled)
+            return self._public(job, target_record)
 
     async def _start_handshake(self, job: JobInfo, scheduled: asyncio.Future) -> JobInfo:
         deadline = asyncio.get_running_loop().time() + self.startup_handshake_ms / 1_000
@@ -994,6 +1129,7 @@ __all__ = [
     "MAX_PROMPT_LENGTH_CAP",
     "DEFAULT_PROMPT_LENGTH",
     "DEFAULT_START_HANDSHAKE_MS",
+    "DEFAULT_HANDOFF_TIMEOUT_MS",
     "MAX_START_HANDSHAKE_MS",
     "MAX_PROMPT_LENGTH",
     "MAX_RECEIPT_LENGTH",

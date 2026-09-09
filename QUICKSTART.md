@@ -79,7 +79,9 @@ For the opt-in experimental path that continues a pre-existing Codex Desktop
 task, configure `desktop_tasks` with a private mode-0600 targets file and use
 the manual Desktop archive/unarchive handoff described in
 [docs/worker-bridge/desktop-task-bridge.md](docs/worker-bridge/desktop-task-bridge.md).
-Targets may set the private `output_format` to `markdown` for a normal
+Targets may set the private `handoff_mode` to `app_server` with an absolute
+private Codex Desktop app-server socket to automate that handoff;
+manual mode remains the default. Targets may set the private `output_format` to `markdown` for a normal
 Markdown response in the visible Desktop task. The status tool returns that
 sanitized report in bounded chunks; use `report_offset` and `report_limit` for
 later chunks. The public prompt schema allows up to 16,000 Unicode characters;

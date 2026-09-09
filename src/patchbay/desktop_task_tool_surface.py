@@ -55,12 +55,14 @@ DESKTOP_TASK_START_TOOL: Dict[str, Any] = {
     "name": DESKTOP_TASK_START_TOOL_NAME,
     "description": (
         "Experimental mutating/open-world bridge for a pre-registered Codex Desktop task. "
-        "Use only after explicit user intent and a manual Desktop handoff. Start returns a queued or running receipt "
+        "Use only after explicit user intent. By default the operator must complete a manual Desktop handoff; "
+        "a private alias may opt into the supported Codex app-server archive/unarchive handoff. Start returns a queued or running receipt "
         "for a healthy handoff, or surfaces an immediate startup failure (such as active_writer, archived_thread, "
         "missing task, auth, or model rejection) during a short bounded handshake; use codex_desktop_task_status "
         "for local progress and the bounded final answer. "
-        "The operator must archive the task in Desktop, unarchive it in Desktop, then leave it idle/unloaded before starting. "
-        "Desktop remains the transcript viewer. PatchBay never archives, unarchives, or edits session files. "
+        "For manual aliases, the operator must archive the task in Desktop, unarchive it in Desktop, then leave it idle/unloaded before starting. "
+        "For app-server aliases, PatchBay performs that sequence through the private configured Desktop app-server and verifies idle/notLoaded readiness. "
+        "Desktop remains the transcript viewer. PatchBay never edits session files or uses CLI archive/unarchive fallbacks. "
         "active_writer and archived_thread failures require Desktop recovery and a new receipt_id. "
         "The feature exists only when desktop_tasks.enabled=true and a private targets_file are configured."
     ),

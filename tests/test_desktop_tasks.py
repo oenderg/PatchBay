@@ -196,6 +196,57 @@ def test_desktop_target_output_format_defaults_and_is_strict(tmp_path: Path):
         load_desktop_targets(path)
 
 
+def test_desktop_target_app_server_handoff_is_private_and_strict(tmp_path: Path):
+    path = tmp_path / "targets.json"
+    write_targets(
+        path,
+        aliases={
+            "MTP Luna": {
+                "thread_id": PRIVATE_THREAD_ID,
+                "handoff_mode": "app_server",
+                "app_server_socket": "/private/tmp/codex-desktop.sock",
+            }
+        },
+    )
+    target = load_desktop_targets(path)["MTP Luna"]
+    assert target.handoff_mode == "app_server"
+    assert target.app_server_socket == "/private/tmp/codex-desktop.sock"
+
+    path.write_text(
+        json.dumps(
+            {
+                "targets": {
+                    "MTP Luna": {
+                        "thread_id": PRIVATE_THREAD_ID,
+                        "handoff_mode": "app_server",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    with pytest.raises(DesktopTaskError, match="app_server_socket is required"):
+        load_desktop_targets(path)
+
+    path.write_text(
+        json.dumps(
+            {
+                "targets": {
+                    "MTP Luna": {
+                        "thread_id": PRIVATE_THREAD_ID,
+                        "app_server_socket": "relative.sock",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    with pytest.raises(DesktopTaskError, match="app_server_socket must be an absolute path"):
+        load_desktop_targets(path)
+
+
 def test_desktop_target_prompt_limit_defaults_and_stays_within_global_cap(tmp_path: Path):
     path = tmp_path / "targets.json"
     write_targets(path)
@@ -342,7 +393,7 @@ async def test_start_returns_queued_quickly_and_enforces_receipt_and_target_idem
 
     again = await client.start(target="MTP Luna", receipt_id="trial-1", prompt="Continue.")
     assert again == started
-    assert len(executor.scheduled) == 2  # schedule_job is itself idempotent in the real executor
+    assert len(executor.scheduled) == 1  # the receipt itself is idempotent
 
     with pytest.raises(DesktopTaskError, match="already used"):
         await client.start(target="MTP Luna", receipt_id="trial-1", prompt="Different.")
@@ -356,6 +407,94 @@ async def test_start_returns_queued_quickly_and_enforces_receipt_and_target_idem
     job = manager.get_job(executor.scheduled[0])
     assert job is not None
     assert PRIVATE_THREAD_ID in json.dumps(job.options)
+
+
+@pytest.mark.asyncio
+async def test_app_server_handoff_prepares_once_and_starts_exactly_once(tmp_path):
+    config, manager, executor, _unused_client = make_client(tmp_path)
+    calls = []
+
+    async def handoff(socket_path, thread_id):
+        calls.append((socket_path, thread_id))
+
+    socket_path = str(tmp_path / "codex-app-server.sock")
+    target = make_target(handoff_mode="app_server", app_server_socket=socket_path)
+    client = DesktopTaskClient(
+        config,
+        manager,
+        executor,
+        {"MTP Luna": target},
+        handoff_runner=handoff,
+    )
+
+    started = await client.start(target="MTP Luna", receipt_id="handoff-once", prompt="Continue.")
+    repeated = await client.start(target="MTP Luna", receipt_id="handoff-once", prompt="Continue.")
+
+    assert started["state"] == "queued"
+    assert repeated == started
+    assert calls == [(socket_path, PRIVATE_THREAD_ID)]
+    assert len(executor.scheduled) == 1
+    job = manager.get_job(executor.scheduled[0])
+    assert job is not None
+    assert job.options["_desktop_task_handoff_state"] == "released"
+    assert job.options["_desktop_task_scheduled"] is True
+
+
+@pytest.mark.asyncio
+async def test_app_server_handoff_failure_is_durable_and_fail_closed(tmp_path):
+    config, manager, executor, _unused_client = make_client(tmp_path)
+    calls = 0
+
+    async def handoff(_socket_path, _thread_id):
+        nonlocal calls
+        calls += 1
+        from patchbay.desktop_task_handoff import DesktopHandoffError
+
+        raise DesktopHandoffError("desktop_handoff_unavailable")
+
+    target = make_target(
+        handoff_mode="app_server",
+        app_server_socket=str(tmp_path / "codex-app-server.sock"),
+    )
+    client = DesktopTaskClient(config, manager, executor, {"MTP Luna": target}, handoff_runner=handoff)
+
+    first = await client.start(target="MTP Luna", receipt_id="handoff-failure", prompt="Continue.")
+    second = await client.start(target="MTP Luna", receipt_id="handoff-failure", prompt="Continue.")
+
+    assert first["state"] == "failed"
+    assert first["error_code"] == "desktop_handoff_unavailable"
+    assert "new receipt_id" in first["error"]
+    assert second == first
+    assert calls == 1
+    assert executor.scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_interrupted_app_server_handoff_requires_new_receipt(tmp_path):
+    config, manager, executor, _unused_client = make_client(tmp_path)
+    target = make_target(
+        handoff_mode="app_server",
+        app_server_socket=str(tmp_path / "codex-app-server.sock"),
+    )
+    client = DesktopTaskClient(config, manager, executor, {"MTP Luna": target})
+    job = await asyncio.to_thread(
+        client._create_job,
+        "MTP Luna",
+        "handoff-interrupted",
+        "Continue.",
+        target,
+        client.timeout_ms,
+    )
+    manager.mutate_job_options(
+        job.job_id,
+        lambda current: {**current, "_desktop_task_handoff_state": "preparing"},
+    )
+
+    result = await client.start(target="MTP Luna", receipt_id="handoff-interrupted", prompt="Continue.")
+
+    assert result["state"] == "failed"
+    assert result["error_code"] == "desktop_handoff_incomplete"
+    assert executor.scheduled == []
 
 
 @pytest.mark.asyncio

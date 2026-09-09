@@ -17,6 +17,19 @@ characters, hard cap 16,000). This private per-alias limit lets long,
 human-readable engineering briefs pass the public MCP schema while an
 operator can keep a particular alias lower.
 
+Targets use `handoff_mode: manual` by default. An operator who has verified
+that a private `app_server_socket` belongs to the same Codex Desktop app-server
+may set `handoff_mode: app_server` and provide that absolute Unix socket path.
+PatchBay then uses the official app-server WebSocket methods
+`thread/archive`, `thread/unarchive`, and `thread/read` to release the writer
+and verify `idle` or `notLoaded` readiness before scheduling the CLI turn. The
+app-server adapter is opt-in per alias, bounded, alias-only, and fail-closed;
+it does not discover sockets, expose the path, or fall back to CLI archive or
+unarchive commands. A missing socket, active final status, protocol failure,
+or interrupted handoff produces a durable failed receipt and requires a new
+receipt after local recovery. Manual Desktop handoff remains the compatible
+fallback when no Desktop-owned app-server socket is configured.
+
 Targets default to `output_format: structured`. Set that private field to
 `markdown` when the Desktop transcript should show the model's ordinary
 Markdown final response. Markdown mode keeps `--json` lifecycle events but
@@ -26,15 +39,18 @@ stream. Structured mode keeps the existing schema-constrained command.
 
 ## Desktop handoff
 
-Desktop remains the owner of archive state and the transcript viewer. Before a
-turn, use this sequence in Desktop:
+Desktop remains the owner of archive state and the transcript viewer. For a
+manual alias, before a turn use this sequence in Desktop:
 
 1. Archive the task in Desktop.
 2. Unarchive the task in Desktop.
 3. Leave it idle and unloaded.
 4. Call `codex_desktop_task_start` with a new `receipt_id`.
 
-PatchBay never edits session files and never archives or unarchives a task.
+PatchBay never edits session files. For `handoff_mode: app_server`, the same
+archive/unarchive sequence is requested through the private Desktop app-server
+and PatchBay verifies the resulting status before the CLI starts. For manual
+aliases, PatchBay never archives or unarchives a task.
 Opening or navigating to the task for inspection is allowed, but sending a
 native Desktop message can reclaim the writer while the CLI turn is running.
 
