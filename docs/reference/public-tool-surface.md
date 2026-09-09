@@ -126,6 +126,27 @@ paths when resolution fails.
 | `codex_interactive_reply` | Start async Codex continuation job | keep, strengthen | Marked mutating/open-world; uses session repo metadata when available. |
 | `codex_get_config` | Return redacted config/capabilities | keep | Does not expose raw local config, private paths, or hidden feature details. |
 
+### Experimental Codex Desktop task tools
+
+These tools are absent unless `desktop_tasks.enabled` is explicitly true and
+the configured absolute, existing regular targets file passes the private
+mode-0600 check and contains valid unique aliases/task ids. They
+continue a pre-existing Desktop task through a durable local CLI receipt. The
+start tool is mutating/open-world/non-idempotent and returns quickly; the
+status tool is read-only/idempotent and reads local process state. Both accept
+only a human alias and receipt id. PatchBay never archives, unarchives, edits
+session files, exposes raw task ids, or returns unbounded or unstructured CLI
+output. A completed receipt may include `cleanup_pending` and a bounded
+machine-readable cleanup warning when fail-closed process cleanup still needs
+operator recovery. The required Desktop handoff and active-writer/archive
+recovery are documented in
+[the compatibility note](../worker-bridge/desktop-task-bridge.md).
+
+| Tool | Mutability | Role |
+| --- | --- | --- |
+| `codex_desktop_task_start` | mutating/open-world/non-idempotent | Queue one bounded turn for an allowlisted Desktop task and return its receipt. |
+| `codex_desktop_task_status` | read-only/idempotent | Read queued/running/completed/failed local receipt state and the bounded final answer. |
+
 ## Natural-Language Worker Tools
 
 PatchBay includes durable natural-language workers summarized in [../worker-bridge/README.md](../worker-bridge/README.md). These tools are the preferred durable delegation path when ChatGPT wants to manage an ongoing named Codex colleague without exposing job ids, session ids, branch names, or private paths.
@@ -286,7 +307,7 @@ Model-selection guidance is not a hard router. It should help ChatGPT manage wor
 - GPT-5.6 Sol is the highest-authority lane for innovation, creative architecture, difficult synthesis, unresolved problems, sensitive/final judgment, and the hardest implementation or review lanes. Medium is the normal Sol effort. Above-medium Sol is rare and should follow concrete difficulty or consequence: serious bugs, sensitive development, unusually costly mistakes, or evidence that medium is insufficient. Reserve max/ultra for exceptional escalation; ultra may consume roughly 5-10x medium tokens depending on task difficulty.
 - Spark is the preferred first choice over GPT-5.4 Mini for bounded small-worker assignments it can handle because it is dramatically faster and uses a separate research-preview quota. GPT-5.4 Mini is the immediate fallback when Spark is unavailable, depleted, or too context-constrained; continue or retry the same assignment rather than abandoning the lane.
 - GPT-5.4 and GPT-5.5 remain availability, compatibility, or evidence-backed regression fallbacks.
-- Optimize expected subscription use to a verified result, not nominal cost per turn. Codex CLI `0.144.1` exposes `ultra` as a reasoning effort on supported models such as Terra and Sol; it may automatically delegate inside one worker. Prefer explicit named PatchBay workers when visible lanes, reports, worktrees, or integration control matter.
+- Optimize expected subscription use to a verified result, not nominal cost per turn. The current local Codex CLI `0.153.4` exposes `ultra` as a reasoning effort on supported models such as Terra and Sol; older compatibility evidence used `0.144.1`. It may automatically delegate inside one worker. Prefer explicit named PatchBay workers when visible lanes, reports, worktrees, or integration control matter.
 
 Worker file inspection:
 

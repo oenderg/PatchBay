@@ -10,7 +10,8 @@ the generic verification contract and collaborator-safe results.
 
 | Area | Status |
 | --- | --- |
-| Codex CLI baseline | Current local verification recorded `codex-cli 0.144.1` |
+| Codex CLI baseline | Current local verification recorded `codex-cli 0.153.4` |
+| Experimental Desktop task bridge | Human-gated disposable Web-to-Desktop acceptance passed: High-mode Web Sol drafted and waited for approval; after explicit approval, the opt-in start/status lifecycle returned the bounded final answer and persisted its receipt. The feature remains disabled by default. |
 | Python checks | `compileall` passes |
 | Test suite | Release `9907bc8`: `973 passed, 4 skipped` on macOS and `975 passed, 2 skipped` on the deployed production Linux Hub across the same 977-test inventory. |
 | Live local MCP probe | `scripts/live_mcp_eval.py --json` passes against a disposable repo |

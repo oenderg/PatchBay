@@ -13,7 +13,7 @@ Recommended Codex CLI baseline for the current branch:
 
 ```bash
 codex --version
-# codex-cli 0.144.1
+# codex-cli 0.153.4
 ```
 
 Install dependencies:
@@ -48,6 +48,17 @@ server:
 app:
   tool_mode: worker
   widget_domain: https://web-sandbox.oaiusercontent.com
+
+# Disabled by default. Enable only for a private, disposable Desktop task.
+# The targets file must be an existing regular file with mode 0600 (or stricter),
+# use an absolute path, contain valid unique targets, and must not be committed.
+# Desktop owns archive/unarchive and writer handoff.
+desktop_tasks:
+  enabled: false
+  targets_file: /private/path/to/desktop-task-targets.json
+  codex_bin: codex
+  timeout_ms: 1800000
+  retention_hours: 24
 
 auth:
   enabled: false

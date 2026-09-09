@@ -1,0 +1,139 @@
+"""Public descriptors for the opt-in Codex Desktop task bridge."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from typing import Any, Dict
+
+from patchbay.desktop_tasks import desktop_tasks_enabled
+
+
+DESKTOP_TASK_START_TOOL_NAME = "codex_desktop_task_start"
+DESKTOP_TASK_STATUS_TOOL_NAME = "codex_desktop_task_status"
+DESKTOP_TASK_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "ok": {"type": "boolean"},
+        "target": {"type": "string"},
+        "receipt_id": {"type": "string"},
+        "state": {"type": "string", "enum": ["queued", "running", "completed", "failed"]},
+        "answer": {"type": "string"},
+        "answer_truncated": {"type": "boolean"},
+        "event_count": {"type": "integer"},
+        "error_code": {"type": "string"},
+        "error": {"type": "string"},
+        "warning_code": {"type": "string"},
+        "warning": {"type": "string"},
+        "cleanup_pending": {"type": "boolean"},
+        "cleanup_warning_code": {"type": "string"},
+        "cleanup_warning": {"type": "string"},
+    },
+}
+
+
+_COMMON_TARGET_PROPERTIES = {
+    "target": {
+        "type": "string",
+        "description": "Allowlisted human alias for a pre-registered Desktop task. Raw Codex task/session ids are not accepted.",
+    },
+    "receipt_id": {
+        "type": "string",
+        "description": "Stable caller receipt id. Reusing it with different input is rejected; retention is bounded.",
+    },
+}
+
+
+DESKTOP_TASK_START_TOOL: Dict[str, Any] = {
+    "name": DESKTOP_TASK_START_TOOL_NAME,
+    "description": (
+        "Experimental mutating/open-world bridge for a pre-registered Codex Desktop task. "
+        "Use only after explicit user intent and a manual Desktop handoff. Start returns immediately "
+        "with a queued or running receipt; use codex_desktop_task_status for local progress and the bounded final answer. "
+        "The operator must archive the task in Desktop, unarchive it in Desktop, then leave it idle/unloaded before starting. "
+        "Desktop remains the transcript viewer. PatchBay never archives, unarchives, or edits session files. "
+        "active_writer and archived_thread failures require Desktop recovery and a new receipt_id. "
+        "The feature exists only when desktop_tasks.enabled=true and a private targets_file are configured."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            **_COMMON_TARGET_PROPERTIES,
+            "prompt": {
+                "type": "string",
+                "description": "Bounded natural-language prompt for the next Desktop task turn.",
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "description": "Optional bounded local execution timeout; capped by desktop_tasks.timeout_ms.",
+            },
+        },
+        "required": ["target", "receipt_id", "prompt"],
+    },
+    "readOnlyHint": False,
+}
+
+
+DESKTOP_TASK_STATUS_TOOL: Dict[str, Any] = {
+    "name": DESKTOP_TASK_STATUS_TOOL_NAME,
+    "description": (
+        "Read the local durable receipt for a pre-registered Codex Desktop task. "
+        "Returns queued, running, completed, or failed and includes the bounded final answer only after completion. "
+        "This is local process/job monitoring, not a model polling request. Pass only the human alias and receipt_id; "
+        "raw task/session ids, paths, prompts, and unstructured CLI output are never returned. A completed receipt "
+        "may include cleanup_pending when PatchBay retained a fail-closed process cleanup barrier. Retention is bounded."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": deepcopy(_COMMON_TARGET_PROPERTIES),
+        "required": ["target", "receipt_id"],
+    },
+    "readOnlyHint": True,
+}
+
+
+def install_desktop_task_tool_surface(
+    *,
+    tools: list[Dict[str, Any]],
+    tools_by_name: Dict[str, Dict[str, Any]],
+    public_tool_names: set[str],
+    tool_modes: Dict[str, set[str]],
+    open_world_tools: set[str],
+    non_idempotent_tools: set[str],
+    invocation_status: Dict[str, tuple[str, str]],
+    output_schemas: Dict[str, Dict[str, Any]],
+) -> None:
+    for descriptor in (DESKTOP_TASK_START_TOOL, DESKTOP_TASK_STATUS_TOOL):
+        name = descriptor["name"]
+        if name not in tools_by_name:
+            copied = deepcopy(descriptor)
+            tools.append(copied)
+            tools_by_name[name] = copied
+            public_tool_names.add(name)
+        for mode in ("worker", "standard", "full"):
+            tool_modes.setdefault(mode, set()).add(name)
+        output_schemas[name] = deepcopy(DESKTOP_TASK_OUTPUT_SCHEMA)
+
+    open_world_tools.add(DESKTOP_TASK_START_TOOL_NAME)
+    non_idempotent_tools.add(DESKTOP_TASK_START_TOOL_NAME)
+    invocation_status[DESKTOP_TASK_START_TOOL_NAME] = (
+        "Starting Desktop task",
+        "Desktop task receipt created",
+    )
+    invocation_status[DESKTOP_TASK_STATUS_TOOL_NAME] = (
+        "Reading Desktop task status",
+        "Desktop task status ready",
+    )
+
+
+__all__ = [
+    "DESKTOP_TASK_OUTPUT_SCHEMA",
+    "DESKTOP_TASK_START_TOOL",
+    "DESKTOP_TASK_START_TOOL_NAME",
+    "DESKTOP_TASK_STATUS_TOOL",
+    "DESKTOP_TASK_STATUS_TOOL_NAME",
+    "desktop_tasks_enabled",
+    "install_desktop_task_tool_surface",
+]

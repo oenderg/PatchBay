@@ -28,7 +28,15 @@ The goal is maximum useful capability with explicit control.
 | Handoff watcher | Plan becomes local execution | Explicit local command, dry-run, status artifacts |
 | Public tunnel | Internet-exposed MCP endpoint | Token required, no `--no-auth`, rotation, warnings |
 | Session history | Private transcript exposure | Default off, metadata first, bounded reads |
+| Codex Desktop task bridge | Continue a pre-existing Desktop task through local CLI | Explicit opt-in, private alias allowlist, mode-0600 targets, manual Desktop writer/archive handoff, bounded receipts, no session-file/archive mutation |
 | Hub to Edge operations | Duplicate, stale, or cross-version effects | Durable idempotency, immutable attempt contracts, fencing tokens, payload hashes, lease reconciliation, and current-session authentication |
+
+The experimental Codex Desktop task bridge is a separate opt-in boundary. Its
+targets file is private and maps human aliases to private Desktop session
+settings. Public calls cannot supply raw task ids, paths, model/profile values,
+or arbitrary commands. Desktop remains the owner of archive state and the
+transcript viewer; PatchBay starts and monitors only the bounded local CLI
+turn, and reports active-writer or stale-archive recovery as a failed receipt.
 
 Hub transport identity has two deliberate layers. The current Edge-session
 contract authenticates the live connection, while every claimed attempt and

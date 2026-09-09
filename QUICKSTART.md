@@ -75,6 +75,11 @@ For local-only MCP clients, no token is required by default. If `PATCHBAY_HTTP_T
 
 The launcher supervises the local server and tunnel process together. It validates tunnel binaries before use. Install Cloudflare Tunnel explicitly with `patchbay install-cloudflared`, or install/configure `ngrok` yourself and use `patchbay ngrok --hostname <reserved-domain>`. Use `--tool-mode worker` first so ChatGPT sees the worker-first surface instead of the full power-user catalog.
 
+For the opt-in experimental path that continues a pre-existing Codex Desktop
+task, configure `desktop_tasks` with a private mode-0600 targets file and use
+the manual Desktop archive/unarchive handoff described in
+[docs/worker-bridge/desktop-task-bridge.md](docs/worker-bridge/desktop-task-bridge.md).
+
 OpenAI's Apps SDK docs describe the ChatGPT connector flow as: enable Developer Mode, create a connector, paste an HTTPS `/mcp` URL, then open a new chat and add the connector from the `+` / More menu. References:
 
 - [OpenAI Apps SDK quickstart: Add your app to ChatGPT](https://developers.openai.com/apps-sdk/quickstart#add-your-app-to-chatgpt)

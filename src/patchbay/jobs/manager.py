@@ -744,6 +744,20 @@ class JobManager:
                     continue
                 if terminal_cleanup_pending(job.wrapper_cleanup_outcome):
                     continue
+                if (job.options or {}).get("_desktop_task"):
+                    try:
+                        desktop_retention_hours = float(
+                            (self.config.get("desktop_tasks") or {}).get(
+                                "retention_hours", self.cleanup_after_hours
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        desktop_retention_hours = float(self.cleanup_after_hours)
+                    desktop_retention_hours = max(1.0, min(desktop_retention_hours, 7 * 24.0))
+                    desktop_cleanup_threshold = time.time() - desktop_retention_hours * 3600
+                    if job.completed_at and job.completed_at < desktop_cleanup_threshold:
+                        to_remove.append(job_id)
+                    continue
                 if job.completed_at and job.completed_at < cleanup_threshold:
                     to_remove.append(job_id)
         

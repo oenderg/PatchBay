@@ -176,6 +176,241 @@ async def test_proven_terminal_lease_reconciliation_keeps_unproven_cleanup_locke
 
 
 @pytest.mark.asyncio
+async def test_stale_supervisor_recovery_releases_only_after_fresh_absence_proof(
+    tmp_path, monkeypatch
+):
+    config = make_config(tmp_path)
+    manager = JobManager(config)
+    executor = JobExecutor(config, manager)
+    repo = config["repositories"]["default"]
+    proof = tmp_path / "logs" / "jobs" / "stale-supervisor.proof"
+    supervisor_pid = 999_999_901
+    sentinel_pid = 999_999_902
+    options = mark_repo_lock_options(
+        {
+            _JOB_PROCESS_MARKER_VERSION_OPTION: _JOB_PROCESS_MARKER_VERSION,
+            "_job_process_supervisor_version": 3,
+            "_job_process_supervisor_spawned": True,
+            "_job_process_supervisor_cleanup_proof": str(proof),
+        },
+        operation="stale_supervisor_recovery",
+    )
+    job_id = manager.create_job(
+        "resume", "stale supervisor", repo, options
+    )
+    manager.update_job_state(
+        job_id,
+        JobState.COMPLETED,
+        process_pid=supervisor_pid,
+        process_pgid=supervisor_pid,
+        result=full_result("STALE_SUPERVISOR"),
+        wrapper_cleanup_outcome="cleanup_blocked_untrusted_process_identity",
+    )
+    proof.parent.mkdir(parents=True, exist_ok=True)
+    proof.write_text(
+        f"patchbay-supervisor-cleanup-unproven-v2:{supervisor_pid}:{sentinel_pid}\n",
+        encoding="ascii",
+    )
+    monkeypatch.setattr(executor, "_process_group_liveness", lambda _pgid: False)
+    monkeypatch.setattr(
+        executor,
+        "_job_marked_process_pids",
+        lambda *_args, **_kwargs: set(),
+    )
+
+    assert executor._supervisor_cleanup_proven(job_id) is False
+    assert executor.reconcile_stale_terminal_cleanup(job_id) is True
+    assert manager.get_job(job_id).wrapper_cleanup_outcome == (
+        "stale_supervisor_reconciled"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_supervisor_recovery_keeps_lock_when_process_observation_is_unknown(
+    tmp_path, monkeypatch
+):
+    config = make_config(tmp_path)
+    manager = JobManager(config)
+    executor = JobExecutor(config, manager)
+    repo = config["repositories"]["default"]
+    proof = tmp_path / "logs" / "jobs" / "unknown-supervisor.proof"
+    supervisor_pid = 999_999_903
+    sentinel_pid = 999_999_904
+    options = mark_repo_lock_options(
+        {
+            _JOB_PROCESS_MARKER_VERSION_OPTION: _JOB_PROCESS_MARKER_VERSION,
+            "_job_process_supervisor_version": 3,
+            "_job_process_supervisor_spawned": True,
+            "_job_process_supervisor_cleanup_proof": str(proof),
+        },
+        operation="unknown_supervisor_recovery",
+    )
+    job_id = manager.create_job("resume", "unknown supervisor", repo, options)
+    manager.update_job_state(
+        job_id,
+        JobState.COMPLETED,
+        process_pid=supervisor_pid,
+        process_pgid=supervisor_pid,
+        result=full_result("UNKNOWN_SUPERVISOR"),
+        wrapper_cleanup_outcome="cleanup_blocked_untrusted_process_identity",
+    )
+    proof.parent.mkdir(parents=True, exist_ok=True)
+    proof.write_text(
+        f"patchbay-supervisor-cleanup-unproven-v2:{supervisor_pid}:{sentinel_pid}\n",
+        encoding="ascii",
+    )
+    monkeypatch.setattr(executor, "_process_group_liveness", lambda _pgid: False)
+    monkeypatch.setattr(
+        executor,
+        "_job_marked_process_pids",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert executor.reconcile_stale_terminal_cleanup(job_id) is False
+    assert manager.get_job(job_id).wrapper_cleanup_outcome == (
+        "cleanup_blocked_untrusted_process_identity"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_supervisor_recovery_retires_matching_orphan_sentinel(
+    tmp_path, monkeypatch
+):
+    config = make_config(tmp_path)
+    manager = JobManager(config)
+    executor = JobExecutor(config, manager)
+    repo = config["repositories"]["default"]
+    proof = tmp_path / "logs" / "jobs" / "matching-sentinel.proof"
+    supervisor_pid = 999_999_905
+    sentinel_pid = 999_999_906
+    options = mark_repo_lock_options(
+        {
+            _JOB_PROCESS_MARKER_VERSION_OPTION: _JOB_PROCESS_MARKER_VERSION,
+            "_job_process_supervisor_version": 3,
+            "_job_process_supervisor_spawned": True,
+            "_job_process_supervisor_cleanup_proof": str(proof),
+        },
+        operation="matching_sentinel_recovery",
+    )
+    job_id = manager.create_job("resume", "matching sentinel", repo, options)
+    manager.update_job_state(
+        job_id,
+        JobState.COMPLETED,
+        process_pid=supervisor_pid,
+        process_pgid=supervisor_pid,
+        result=full_result("MATCHING_SENTINEL"),
+        wrapper_cleanup_outcome="cleanup_blocked_untrusted_process_identity",
+    )
+    proof.parent.mkdir(parents=True, exist_ok=True)
+    proof.write_text(
+        f"patchbay-supervisor-cleanup-unproven-v2:{supervisor_pid}:{sentinel_pid}\n",
+        encoding="ascii",
+    )
+    live = {sentinel_pid}
+    killed: list[tuple[int, signal.Signals]] = []
+
+    monkeypatch.setattr(
+        executor, "_process_pid_is_live", lambda pid: pid in live
+    )
+    monkeypatch.setattr(
+        executor,
+        "_job_marked_process_pids",
+        lambda _job_id, *, force_refresh=False: (
+            {sentinel_pid} if sentinel_pid in live else set()
+        ),
+    )
+    monkeypatch.setattr(executor, "_process_group_liveness", lambda _pgid: False)
+    monkeypatch.setattr(
+        executor, "_tracked_descendant_liveness", lambda _job_id: False
+    )
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(os, "getsid", lambda pid: pid, raising=False)
+
+    def fake_kill(pid, sig):
+        killed.append((pid, sig))
+        live.discard(pid)
+
+    monkeypatch.setattr(os, "kill", fake_kill)
+
+    assert executor.reconcile_stale_terminal_cleanup(job_id) is True
+    assert killed == [(sentinel_pid, signal.SIGKILL)]
+    assert manager.get_job(job_id).wrapper_cleanup_outcome == (
+        "stale_supervisor_reconciled"
+    )
+    assert proof.read_text(encoding="ascii").startswith(
+        "patchbay-supervisor-cleanup-unproven-v2:"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "marked,descendant_liveness",
+    [
+        ({999_999_907, 999_999_908}, False),
+        ({999_999_907}, True),
+        (None, False),
+    ],
+)
+async def test_stale_supervisor_recovery_keeps_ambiguous_or_live_sentinel_locked(
+    tmp_path, monkeypatch, marked, descendant_liveness
+):
+    config = make_config(tmp_path)
+    manager = JobManager(config)
+    executor = JobExecutor(config, manager)
+    repo = config["repositories"]["default"]
+    proof = tmp_path / "logs" / "jobs" / "ambiguous-sentinel.proof"
+    supervisor_pid = 999_999_909
+    sentinel_pid = 999_999_907
+    options = mark_repo_lock_options(
+        {
+            _JOB_PROCESS_MARKER_VERSION_OPTION: _JOB_PROCESS_MARKER_VERSION,
+            "_job_process_supervisor_version": 3,
+            "_job_process_supervisor_spawned": True,
+            "_job_process_supervisor_cleanup_proof": str(proof),
+        },
+        operation="ambiguous_sentinel_recovery",
+    )
+    job_id = manager.create_job("resume", "ambiguous sentinel", repo, options)
+    manager.update_job_state(
+        job_id,
+        JobState.COMPLETED,
+        process_pid=supervisor_pid,
+        process_pgid=supervisor_pid,
+        result=full_result("AMBIGUOUS_SENTINEL"),
+        wrapper_cleanup_outcome="cleanup_blocked_untrusted_process_identity",
+    )
+    proof.parent.mkdir(parents=True, exist_ok=True)
+    proof.write_text(
+        f"patchbay-supervisor-cleanup-unproven-v2:{supervisor_pid}:{sentinel_pid}\n",
+        encoding="ascii",
+    )
+    killed: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(
+        executor,
+        "_process_pid_is_live",
+        lambda pid: pid == sentinel_pid,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_job_marked_process_pids",
+        lambda _job_id, *, force_refresh=False: marked,
+    )
+    monkeypatch.setattr(executor, "_process_group_liveness", lambda _pgid: False)
+    monkeypatch.setattr(
+        executor,
+        "_tracked_descendant_liveness",
+        lambda _job_id: descendant_liveness,
+    )
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    assert executor.reconcile_stale_terminal_cleanup(job_id) is False
+    assert killed == []
+    assert manager.get_job(job_id).wrapper_cleanup_outcome == (
+        "cleanup_blocked_untrusted_process_identity"
+    )
+
+
+@pytest.mark.asyncio
 async def test_repo_lease_reconciliation_keeps_missing_job_locked(tmp_path):
     config = make_config(tmp_path)
     manager = JobManager(config)

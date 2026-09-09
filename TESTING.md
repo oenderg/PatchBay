@@ -33,10 +33,19 @@ PYTHONDONTWRITEBYTECODE=1 python scripts/real_mcp_worker_trial.py --include-safe
 PYTHONDONTWRITEBYTECODE=1 python scripts/external_chatgpt_style_validation.py --json
 ```
 
+The opt-in Desktop task bridge has focused coverage for alias/configuration
+privacy, durable receipt restart/recovery, idempotency, semantic completion
+after a nonzero wrapper exit, writer/archive failure classification, and the
+public tool surface:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -q tests/test_desktop_tasks.py tests/test_tool_surface.py tests/test_job_executor_command.py
+```
+
 Current verified Codex CLI baseline:
 
 ```text
-codex-cli 0.144.1
+codex-cli 0.153.4
 ```
 
 The unit suite verifies:
@@ -170,7 +179,7 @@ For execution changes, run a disposable real-Codex plan job through MCP. The exp
 5. call `codex_get_result`;
 6. confirm a clean structured summary and `session_ref` when Codex returns one.
 
-Current final validation recorded Codex CLI `0.144.1` and confirmed PatchBay parses the current JSONL `item.completed` / `agent_message` result shape. Worker verification should always record the current local `codex --version`.
+Current final validation recorded Codex CLI `0.153.4` and confirmed PatchBay parses the current JSONL `item.completed` / `agent_message` result shape. Older external validation notes may retain `0.144.1` as historical evidence. Worker verification should always record the current local `codex --version`.
 
 ## Real Codex Worker Continuity
 
