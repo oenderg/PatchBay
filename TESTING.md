@@ -96,6 +96,22 @@ patchbay start --root /absolute/path/to/allowed/repo --tool-mode worker --print-
 patchbay stdio --config config.yaml
 ```
 
+On macOS, an optional user LaunchAgent can keep the local listener available
+across login and unexpected process exits. Validate the installed service
+without printing its private config or tunnel URL:
+
+```bash
+launchctl print "gui/$(id -u)/com.patchbay.local"
+curl --fail --silent --show-error http://127.0.0.1:8000/status >/dev/null
+```
+
+For a restart check, record the listener PID from local process inspection,
+send that process `SIGKILL`, and verify that a new listener becomes healthy.
+Use the existing MCP self-test and a read-only status request for a completed
+receipt to confirm that durable state remains available. Do not dispatch a new
+worker merely to test service restart. The public tunnel is an independent
+process and should return a non-502 response once the local listener is ready.
+
 Expected output includes readiness checks, the local MCP URL, a redacted ChatGPT Server URL preview when token auth is enabled, a ChatGPT setup guide, and no raw token value. JSON output should include `setup_guide` with `chatgpt_steps`, `operator_commands`, `controls`, `warnings`, and profile metadata.
 
 For public ChatGPT tunnel previews, set `PATCHBAY_HTTP_TOKEN` before using `--public-base-url`; the launcher should fail closed without that token.

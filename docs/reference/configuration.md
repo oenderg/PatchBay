@@ -177,6 +177,36 @@ pro_requests:
 
 Blank logging paths resolve outside the checkout under `PATCHBAY_HOME/runtime` when `PATCHBAY_HOME` is set, otherwise under `~/.patchbay/runtime`. Set explicit paths only when you deliberately want repo-local or custom runtime state.
 
+### Keeping a local macOS listener available
+
+For a long-lived local connector, install the optional per-user LaunchAgent
+after the private runtime config and Desktop target allowlist are ready:
+
+```bash
+PYTHONPATH=src python scripts/install_macos_launch_agent.py \
+  --config /private/path/to/desktop-trial.yaml \
+  --patchbay-home /private/path/to/patchbay-home \
+  --log-dir /private/path/to/patchbay-home/runtime/logs/launchd \
+  --python /private/path/to/venv/bin/python \
+  --codex-bin /opt/homebrew/bin/codex
+```
+
+The installer writes a mode-0600 plist under the current user's
+`~/Library/LaunchAgents`, uses `RunAtLoad` and `KeepAlive`, and runs as the
+logged-in user with a narrow executable path. It does not use `sudo`, create a
+system daemon, alter the private config, or expose target IDs. Standard output
+and error go to the supplied private log directory. Re-run the command after
+changing the checkout, Python environment, or runtime config; it replaces only
+the installer-owned label. `launchctl print gui/$(id -u)/com.patchbay.local`
+shows the loaded service.
+
+The managed tunnel remains a separate process. Verify both the local listener
+and the tunnel after installation, and treat a tunnel-side 502 as a transport
+or local-listener readiness failure until the local service is healthy. A
+Desktop task that owns the writer still requires the Desktop-native
+archive/unarchive handoff before a new continuation; launchd cannot resolve
+that ownership state.
+
 `audit_file` is compact metadata. `job_logs_dir` stores bounded/redacted Codex
 stdout, stderr, and result artifacts. `job_state_dir` stores durable job state
 without prompt bodies. `private_evidence_dir` stores optional private evidence:
