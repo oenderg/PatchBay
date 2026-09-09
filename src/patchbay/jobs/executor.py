@@ -3522,7 +3522,15 @@ class JobExecutor:
         if options.get("ignore_user_config"):
             cmd.append("--ignore-user-config")
 
-        if options.get('structured_output', True):
+        # Desktop markdown reports still use JSON lifecycle events, but the
+        # final agent message must remain ordinary Markdown.  The private
+        # target option only affects Desktop jobs; all other structured jobs
+        # retain the historical schema-constrained command.
+        use_desktop_markdown = (
+            options.get("_desktop_task")
+            and options.get("_desktop_task_output_format") == "markdown"
+        )
+        if options.get('structured_output', True) and not use_desktop_markdown:
             cmd.extend(['--output-schema', str(self.schema_path)])
 
         if options.get('json_events', True):

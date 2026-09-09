@@ -33,6 +33,12 @@ MAX_ALIAS_LENGTH = 80
 MAX_RECEIPT_LENGTH = 128
 MAX_PROMPT_LENGTH = 4_000
 MAX_ANSWER_LENGTH = 12_000
+# Reports are persisted after sanitization.  The cap is deliberately larger
+# than the default response chunk so callers can reassemble a useful report
+# without allowing an unbounded model response into durable job state.
+MAX_REPORT_LENGTH = 200_000
+MAX_REPORT_CHUNK_LENGTH = 12_000
+DEFAULT_REPORT_CHUNK_LENGTH = MAX_ANSWER_LENGTH
 MAX_TIMEOUT_MS = 24 * 60 * 60 * 1_000
 DEFAULT_TIMEOUT_MS = 30 * 60 * 1_000
 DEFAULT_RETENTION_HOURS = 24
@@ -44,6 +50,7 @@ DESKTOP_TASK_RECEIPT_OPTION = "_desktop_task_receipt_id"
 DESKTOP_TASK_DIGEST_OPTION = "_desktop_task_request_digest"
 DESKTOP_TASK_TIMEOUT_OPTION = "_desktop_task_timeout_ms"
 DESKTOP_TASK_CODEX_BIN_OPTION = "_desktop_task_codex_bin"
+DESKTOP_TASK_OUTPUT_FORMAT_OPTION = "_desktop_task_output_format"
 
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.: -]{0,79}$")
 _RECEIPT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -56,6 +63,7 @@ _SESSION_ID_RE = re.compile(
 )
 _REASONING = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 _SANDBOXES = frozenset({"read-only", "workspace-write", "danger-full-access"})
+_OUTPUT_FORMATS = frozenset({"structured", "markdown"})
 
 
 class DesktopTaskError(ValueError):
@@ -72,6 +80,7 @@ class DesktopTaskTarget:
     sandbox: str = ""
     profile: str = ""
     skip_git_repo_check: bool = False
+    output_format: str = "structured"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -82,6 +91,7 @@ class DesktopTaskOptions:
     sandbox: str = ""
     profile: str = ""
     skip_git_repo_check: bool = False
+    output_format: str = "structured"
 
 
 def _text(value: Any, *, field: str, maximum: int, required: bool = True) -> str:
@@ -140,6 +150,15 @@ def _profile(value: Any) -> str:
     result = _text(value, field="profile", maximum=120, required=False).strip()
     if result and not _PROFILE_RE.fullmatch(result):
         raise DesktopTaskError("profile contains unsupported characters")
+    return result
+
+
+def _output_format(value: Any) -> str:
+    result = _text(value, field="output_format", maximum=16, required=False).strip().lower()
+    if not result:
+        return "structured"
+    if result not in _OUTPUT_FORMATS:
+        raise DesktopTaskError("output_format is unsupported")
     return result
 
 
@@ -207,6 +226,7 @@ def _target(alias: str, value: Any) -> DesktopTaskTarget:
         sandbox=_sandbox(value.get("sandbox", "")),
         profile=_profile(value.get("profile", "")),
         skip_git_repo_check=_bool(value.get("skip_git_repo_check", False), "skip_git_repo_check"),
+        output_format=_output_format(value.get("output_format", "structured")),
     )
 
 
@@ -288,6 +308,9 @@ def build_desktop_resume_command(
         command.extend(["--profile", options.profile])
     if options.skip_git_repo_check:
         command.append("--skip-git-repo-check")
+    # Desktop markdown mode intentionally leaves the final agent message
+    # unconstrained so Codex can render normal Markdown in its own transcript.
+    # The executor still requests JSON lifecycle events in both modes.
     command.append("--json")
     if options.model:
         command.extend(["--model", options.model])
@@ -358,7 +381,38 @@ def _private_answer(
         # Do not serialize an arbitrary result object: it may contain private
         # session/path fields that are not part of the public Desktop receipt.
         value = selected or ""
-    answer = str(value or "").strip()
+    answer = _sanitize_output_text(value, target, private_values)
+    truncated = len(answer) > MAX_ANSWER_LENGTH
+    return answer[:MAX_ANSWER_LENGTH], truncated
+
+
+def _rewrite_target_cwd(value: str, target_cwd: str) -> str:
+    """Turn paths below the private target workspace into useful relative paths."""
+    if not target_cwd:
+        return value
+    root = str(Path(target_cwd).expanduser())
+    if root == "/":
+        return value
+    root = root.rstrip("/")
+    value = value.replace(root + "/", "")
+    return re.sub(
+        rf"(?<![A-Za-z0-9_.-]){re.escape(root)}(?![A-Za-z0-9_.-])",
+        ".",
+        value,
+    )
+
+
+def _sanitize_output_text(
+    value: Any,
+    target: DesktopTaskTarget,
+    private_values: tuple[str, ...] = (),
+    *,
+    repo_relative: bool = True,
+) -> str:
+    """Sanitize one report string without changing its Markdown structure."""
+    text = str(value or "")
+    if repo_relative:
+        text = _rewrite_target_cwd(text, target.cwd)
     for private_value in (
         target.thread_id,
         target.cwd,
@@ -367,11 +421,61 @@ def _private_answer(
         *private_values,
     ):
         if private_value and len(private_value) > 2:
-            answer = answer.replace(private_value, "[private]")
-    answer = redact_text(redact_local_paths(answer))
-    answer = _SESSION_ID_RE.sub("[private-session]", answer)
-    truncated = len(answer) > MAX_ANSWER_LENGTH
-    return answer[:MAX_ANSWER_LENGTH], truncated
+            text = text.replace(private_value, "[private]")
+    text = redact_text(redact_local_paths(text))
+    return _SESSION_ID_RE.sub("[private-session]", text)
+
+
+_STRUCTURED_REPORT_FIELDS = (
+    ("summary", "Summary"),
+    ("detailed_report", "Detailed report"),
+    ("evidence", "Evidence"),
+    ("files_changed", "Files changed"),
+    ("commands_run", "Commands run"),
+    ("tests_run", "Tests run"),
+    ("notes", "Notes"),
+    ("risks", "Risks"),
+    ("open_questions", "Open questions"),
+    ("next_steps", "Next steps"),
+)
+
+
+def _render_structured_report(value: Any) -> str:
+    """Render every user-facing structured result field into one report."""
+    if not isinstance(value, Mapping):
+        return str(value or "")
+    sections: list[str] = []
+    for key, heading in _STRUCTURED_REPORT_FIELDS:
+        raw = value.get(key, "" if key in {"summary", "detailed_report", "notes"} else [])
+        if isinstance(raw, list):
+            body = "\n".join(f"- {item}" for item in raw) or "_None_"
+        elif raw is None:
+            body = ""
+        else:
+            body = str(raw)
+        sections.append(f"## {heading}\n{body}")
+    return "\n\n".join(sections)
+
+
+def _report_source(value: Any, output_format: str) -> str:
+    if output_format == "markdown":
+        if isinstance(value, Mapping):
+            for key in ("answer", "detailed_report", "summary", "message"):
+                candidate = value.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate
+            return _render_structured_report(value)
+        return str(value or "")
+    return _render_structured_report(value)
+
+
+def _bounded_report(report: str) -> tuple[str, int, bool]:
+    """Return durable text, its stored length, and whether the hard cap hit."""
+    safe = str(report or "")
+    capped = len(safe) > MAX_REPORT_LENGTH
+    if capped:
+        safe = safe[:MAX_REPORT_LENGTH]
+    return safe, len(safe), capped
 
 
 def _public_error(code: str) -> str:
@@ -508,7 +612,75 @@ class DesktopTaskClient:
             return None
         return sorted(matches, key=lambda item: float(item.started_at or item.completed_at or 0))[-1]
 
-    def _public(self, job: JobInfo, target: DesktopTaskTarget) -> dict[str, Any]:
+    def _persist_report(self, job: JobInfo, payload: Mapping[str, Any]) -> None:
+        """Persist one bounded sanitized report without changing job semantics."""
+        lock = getattr(self.job_manager, "_state_lock", None)
+        if lock is None:
+            return
+        with lock:
+            current = self.job_manager.get_job(job.job_id)
+            if current is None:
+                return
+            merged = dict(current.result or {})
+            changed = False
+            for key, value in payload.items():
+                if merged.get(key) != value:
+                    merged[key] = value
+                    changed = True
+            if not changed:
+                return
+            current.result = merged
+            persist = getattr(self.job_manager, "_persist_job", None)
+            if callable(persist):
+                persist(current)
+            job.result = merged
+
+    def _report_for_job(self, job: JobInfo, target: DesktopTaskTarget) -> dict[str, Any]:
+        result = job.result if isinstance(job.result, dict) else {}
+        stored = result.get("desktop_report")
+        stored_format = result.get("desktop_report_format")
+        if isinstance(stored, str) and stored_format in _OUTPUT_FORMATS:
+            return {
+                "text": stored,
+                "format": stored_format,
+                "total_length": len(stored),
+                "capped": bool(result.get("desktop_report_capped", False)),
+            }
+        report_format = target.output_format
+        source = _report_source(result, report_format)
+        sanitized = _sanitize_output_text(source, target, self._private_output_values)
+        text, total_length, capped = _bounded_report(sanitized)
+        payload = {
+            "desktop_report": text,
+            "desktop_report_format": report_format,
+            "desktop_report_capped": capped,
+        }
+        self._persist_report(job, payload)
+        return {
+            "text": text,
+            "format": report_format,
+            "total_length": total_length,
+            "capped": capped,
+        }
+
+    @staticmethod
+    def _report_argument(value: Any, *, field: str, default: int, maximum: int, minimum: int = 0) -> int:
+        if value is None:
+            return default
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise DesktopTaskError(f"{field} must be an integer")
+        if value < minimum or value > maximum:
+            raise DesktopTaskError(f"{field} must be between {minimum} and {maximum}")
+        return value
+
+    def _public(
+        self,
+        job: JobInfo,
+        target: DesktopTaskTarget,
+        *,
+        report_offset: int = 0,
+        report_limit: int = DEFAULT_REPORT_CHUNK_LENGTH,
+    ) -> dict[str, Any]:
         state = _state_for_job(job)
         result: dict[str, Any] = {
             "ok": state == "completed",
@@ -531,6 +703,22 @@ class DesktopTaskClient:
             if answer:
                 result["answer"] = answer
                 result["answer_truncated"] = truncated
+            report = self._report_for_job(job, target)
+            total_length = int(report["total_length"])
+            if report_offset > total_length:
+                raise DesktopTaskError("report_offset is beyond the durable report")
+            end = min(total_length, report_offset + report_limit)
+            result.update(
+                {
+                    "report_format": report["format"],
+                    "report": report["text"][report_offset:end],
+                    "report_total_length": total_length,
+                    "report_offset": report_offset,
+                    "report_next_offset": end if end < total_length else None,
+                    "report_complete": end >= total_length,
+                    "report_capped": bool(report["capped"]),
+                }
+            )
         if state == "failed":
             result["error_code"] = _error_code(job)
             result["error"] = _public_error(result["error_code"])
@@ -552,6 +740,7 @@ class DesktopTaskClient:
             "structured_output": True,
             "json_events": True,
             "skip_git_repo_check": target.skip_git_repo_check,
+            DESKTOP_TASK_OUTPUT_FORMAT_OPTION: target.output_format,
             "config_overrides": overrides,
             DESKTOP_TASK_MARKER: True,
             DESKTOP_TASK_ALIAS_OPTION: alias,
@@ -569,6 +758,7 @@ class DesktopTaskClient:
             sandbox=target.sandbox,
             profile=target.profile,
             skip_git_repo_check=target.skip_git_repo_check,
+            output_format=target.output_format,
         )
         digest = _request_digest(alias, prompt, options, timeout_ms)
         with self._lock:
@@ -648,17 +838,42 @@ class DesktopTaskClient:
             raise DesktopTaskError("PatchBay could not schedule the Desktop task turn") from exc
         return self._public(job, target_record)
 
-    async def status(self, *, target: Any, receipt_id: Any) -> dict[str, Any]:
+    async def status(
+        self,
+        *,
+        target: Any,
+        receipt_id: Any,
+        report_offset: Any = None,
+        report_limit: Any = None,
+    ) -> dict[str, Any]:
         alias = _alias(target)
         receipt = _receipt(receipt_id)
         target_record = self.targets.get(alias)
         if target_record is None:
             raise DesktopTaskError("target alias is not allowlisted")
+        offset = self._report_argument(
+            report_offset,
+            field="report_offset",
+            default=0,
+            maximum=MAX_REPORT_LENGTH,
+        )
+        limit = self._report_argument(
+            report_limit,
+            field="report_limit",
+            default=DEFAULT_REPORT_CHUNK_LENGTH,
+            maximum=MAX_REPORT_CHUNK_LENGTH,
+            minimum=1,
+        )
         await asyncio.to_thread(self.prune_expired)
         job = self._job_for_receipt(receipt)
         if job is None or str((job.options or {}).get(DESKTOP_TASK_ALIAS_OPTION) or "") != alias:
             raise DesktopTaskError("receipt_id was not found for this target or has expired")
-        return self._public(job, target_record)
+        return self._public(
+            job,
+            target_record,
+            report_offset=offset,
+            report_limit=limit,
+        )
 
     def prune_expired(self) -> int:
         cutoff = time.time() - self.retention_hours * 3600
@@ -685,6 +900,8 @@ __all__ = [
     "DesktopTaskOptions",
     "DesktopTaskTarget",
     "MAX_ANSWER_LENGTH",
+    "MAX_REPORT_CHUNK_LENGTH",
+    "MAX_REPORT_LENGTH",
     "MAX_ALIAS_LENGTH",
     "MAX_PROMPT_LENGTH",
     "MAX_RECEIPT_LENGTH",

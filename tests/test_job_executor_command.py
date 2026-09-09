@@ -205,6 +205,27 @@ def test_desktop_resume_can_use_private_cli_and_skip_git_repo_check(tmp_path):
     assert cmd[-2:] == ["00000000-0000-7000-8000-000000000001", "-"]
 
 
+def test_desktop_markdown_resume_keeps_json_events_without_schema(tmp_path):
+    executor = make_executor(tmp_path)
+
+    cmd = executor._build_codex_command(
+        "resume",
+        "render Markdown",
+        str(tmp_path),
+        {
+            "_desktop_task": True,
+            "_desktop_task_output_format": "markdown",
+            "resume_session_id": "00000000-0000-7000-8000-000000000001",
+            "structured_output": True,
+            "json_events": True,
+        },
+    )
+
+    assert "--json" in cmd
+    assert "--output-schema" not in cmd
+    assert cmd[-2:] == ["00000000-0000-7000-8000-000000000001", "-"]
+
+
 def test_resume_jobs_require_session_id(tmp_path):
     executor = make_executor(tmp_path)
 

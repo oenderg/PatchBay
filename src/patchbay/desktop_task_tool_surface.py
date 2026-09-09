@@ -20,6 +20,13 @@ DESKTOP_TASK_OUTPUT_SCHEMA: Dict[str, Any] = {
         "state": {"type": "string", "enum": ["queued", "running", "completed", "failed"]},
         "answer": {"type": "string"},
         "answer_truncated": {"type": "boolean"},
+        "report_format": {"type": "string", "enum": ["structured", "markdown"]},
+        "report": {"type": "string"},
+        "report_total_length": {"type": "integer"},
+        "report_offset": {"type": "integer"},
+        "report_next_offset": {"type": ["integer", "null"]},
+        "report_complete": {"type": "boolean"},
+        "report_capped": {"type": "boolean"},
         "event_count": {"type": "integer"},
         "error_code": {"type": "string"},
         "error": {"type": "string"},
@@ -80,6 +87,7 @@ DESKTOP_TASK_STATUS_TOOL: Dict[str, Any] = {
     "description": (
         "Read the local durable receipt for a pre-registered Codex Desktop task. "
         "Returns queued, running, completed, or failed and includes the bounded final answer only after completion. "
+        "Completed reports are available through bounded report chunks; use report_offset and report_limit to retrieve later chunks. "
         "This is local process/job monitoring, not a model polling request. Pass only the human alias and receipt_id; "
         "raw task/session ids, paths, prompts, and unstructured CLI output are never returned. A completed receipt "
         "may include cleanup_pending when PatchBay retained a fail-closed process cleanup barrier. Retention is bounded."
@@ -87,7 +95,20 @@ DESKTOP_TASK_STATUS_TOOL: Dict[str, Any] = {
     "inputSchema": {
         "type": "object",
         "additionalProperties": False,
-        "properties": deepcopy(_COMMON_TARGET_PROPERTIES),
+        "properties": {
+            **deepcopy(_COMMON_TARGET_PROPERTIES),
+            "report_offset": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Optional character offset into the sanitized durable report.",
+            },
+            "report_limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 12000,
+                "description": "Optional bounded report chunk size in characters; maximum 12000.",
+            },
+        },
         "required": ["target", "receipt_id"],
     },
     "readOnlyHint": True,

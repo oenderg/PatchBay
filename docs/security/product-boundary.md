@@ -37,6 +37,12 @@ settings. Public calls cannot supply raw task ids, paths, model/profile values,
 or arbitrary commands. Desktop remains the owner of archive state and the
 transcript viewer; PatchBay starts and monitors only the bounded local CLI
 turn, and reports active-writer or stale-archive recovery as a failed receipt.
+Completed Desktop reports are sanitized before being stored: paths below the
+configured target workspace are made repository-relative, other local paths,
+configured private values, secret-like content, and internal UUIDs are
+redacted, and the durable report is capped at 200,000 Unicode characters with
+12,000-character status chunks. The visible Desktop transcript remains the
+native Codex surface; PatchBay does not rewrite it.
 
 Hub transport identity has two deliberate layers. The current Edge-session
 contract authenticates the live connection, while every claimed attempt and

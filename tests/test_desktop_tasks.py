@@ -14,6 +14,7 @@ from patchbay.desktop_tasks import (
     DesktopTaskError,
     DesktopTaskOptions,
     DesktopTaskTarget,
+    MAX_REPORT_LENGTH,
     build_desktop_resume_command,
     desktop_tasks_enabled,
     load_desktop_targets,
@@ -167,6 +168,25 @@ def test_desktop_targets_reject_duplicate_thread_ids(tmp_path: Path):
         },
     )
     with pytest.raises(DesktopTaskError, match="duplicate thread id"):
+        load_desktop_targets(path)
+
+
+def test_desktop_target_output_format_defaults_and_is_strict(tmp_path: Path):
+    path = tmp_path / "targets.json"
+    write_targets(path)
+    assert load_desktop_targets(path)["MTP Luna"].output_format == "structured"
+    path.write_text(
+        json.dumps({"targets": {"MTP Luna": {"thread_id": PRIVATE_THREAD_ID, "output_format": "markdown"}}}),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    assert load_desktop_targets(path)["MTP Luna"].output_format == "markdown"
+    path.write_text(
+        json.dumps({"targets": {"MTP Luna": {"thread_id": PRIVATE_THREAD_ID, "output_format": "html"}}}),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    with pytest.raises(DesktopTaskError, match="output_format is unsupported"):
         load_desktop_targets(path)
 
 
@@ -420,6 +440,119 @@ async def test_public_answer_uses_structured_fields_and_redacts_paths_and_sessio
     raw_status = await client.status(target="MTP Luna", receipt_id="redact-raw-only")
     assert "answer" not in raw_status
     assert "RAW_ONLY_MUST_NOT_ESCAPE" not in json.dumps(raw_status)
+
+
+@pytest.mark.asyncio
+async def test_markdown_report_is_sanitized_without_jsonl_or_private_values(tmp_path):
+    _config, manager, executor, client = make_client(tmp_path)
+    client.targets["MTP Luna"] = make_target(output_format="markdown")
+    await client.start(target="MTP Luna", receipt_id="markdown-1", prompt="Return Markdown.")
+    job = manager.get_job(executor.scheduled[0])
+    assert job is not None
+    manager.update_job_state(
+        job.job_id,
+        JobState.COMPLETED,
+        result={
+            "summary": (
+                "# Result\n\n- changed `src/file.py`\n- workspace: "
+                "/private/tmp/visible-task/src/file.py\n\n"
+                "External /Users/example/private.txt token=fixture-value "
+                "00000000-0000-7000-8000-000000000099"
+            )
+        },
+    )
+
+    status = await client.status(target="MTP Luna", receipt_id="markdown-1")
+
+    assert status["report_format"] == "markdown"
+    assert status["report"] == (
+        "# Result\n\n- changed `src/file.py`\n- workspace: src/file.py\n\n"
+        "External [REDACTED_PATH] token=[REDACTED_POSSIBLE_SECRET] [private-session]"
+    )
+    assert "thread.started" not in status["report"]
+    assert status["report_complete"] is True
+    assert status["report_capped"] is False
+
+
+@pytest.mark.asyncio
+async def test_structured_report_contains_all_schema_fields_and_survives_restart(tmp_path):
+    config, manager, executor, client = make_client(tmp_path)
+    await client.start(target="MTP Luna", receipt_id="structured-report-1", prompt="Report.")
+    job = manager.get_job(executor.scheduled[0])
+    assert job is not None
+    manager.update_job_state(
+        job.job_id,
+        JobState.COMPLETED,
+        result={
+            "summary": "summary marker",
+            "detailed_report": "details marker",
+            "evidence": ["evidence marker"],
+            "files_changed": ["src/change.py"],
+            "commands_run": ["pytest -q"],
+            "tests_run": ["test_report"],
+            "notes": "notes marker",
+            "risks": ["risk marker"],
+            "open_questions": ["question marker"],
+            "next_steps": ["next marker"],
+        },
+    )
+
+    status = await client.status(target="MTP Luna", receipt_id="structured-report-1")
+
+    for marker in (
+        "summary marker", "details marker", "evidence marker", "src/change.py",
+        "pytest -q", "test_report", "notes marker", "risk marker",
+        "question marker", "next marker",
+    ):
+        assert marker in status["report"]
+    assert status["report_format"] == "structured"
+    assert status["report_complete"] is True
+
+    reloaded = JobManager(config)
+    restarted = DesktopTaskClient(
+        config, reloaded, RecordingExecutor(), {"MTP Luna": make_target()}
+    )
+    recovered = await restarted.status(target="MTP Luna", receipt_id="structured-report-1")
+    assert recovered["report"] == status["report"]
+    assert recovered["report_total_length"] == status["report_total_length"]
+
+
+@pytest.mark.asyncio
+async def test_report_chunks_reassemble_and_cap_metadata_is_explicit(tmp_path):
+    _config, manager, executor, client = make_client(tmp_path)
+    client.targets["MTP Luna"] = make_target(output_format="markdown")
+    await client.start(target="MTP Luna", receipt_id="chunks-1", prompt="Long report.")
+    job = manager.get_job(executor.scheduled[0])
+    assert job is not None
+    source = "A" * (MAX_REPORT_LENGTH + 37)
+    manager.update_job_state(job.job_id, JobState.COMPLETED, result={"summary": source})
+
+    pieces = []
+    offset = 0
+    while True:
+        status = await client.status(
+            target="MTP Luna", receipt_id="chunks-1", report_offset=offset, report_limit=5000
+        )
+        pieces.append(status["report"])
+        if status["report_next_offset"] is None:
+            assert status["report_complete"] is True
+            assert status["report_capped"] is True
+            assert status["report_total_length"] == MAX_REPORT_LENGTH
+            break
+        assert status["report_next_offset"] > offset
+        offset = status["report_next_offset"]
+    assert "".join(pieces) == source[:MAX_REPORT_LENGTH]
+
+    with pytest.raises(DesktopTaskError, match="report_offset"):
+        await client.status(target="MTP Luna", receipt_id="chunks-1", report_offset=-1)
+    with pytest.raises(DesktopTaskError, match="report_limit"):
+        await client.status(target="MTP Luna", receipt_id="chunks-1", report_limit=0)
+    with pytest.raises(DesktopTaskError, match="report_limit"):
+        await client.status(target="MTP Luna", receipt_id="chunks-1", report_limit=MAX_REPORT_LENGTH)
+    with pytest.raises(DesktopTaskError, match="report_offset"):
+        await client.status(
+            target="MTP Luna", receipt_id="chunks-1", report_offset=MAX_REPORT_LENGTH + 1
+        )
 
 
 @pytest.mark.asyncio

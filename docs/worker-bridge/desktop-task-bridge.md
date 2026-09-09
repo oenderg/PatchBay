@@ -12,6 +12,13 @@ targets are configured. Each underlying Desktop task id may appear only once
 in that file. A target entry contains the private Desktop task id and may pin its cwd, model, reasoning effort,
 sandbox, profile, and `skip_git_repo_check`. Do not commit the targets file.
 
+Targets default to `output_format: structured`. Set that private field to
+`markdown` when the Desktop transcript should show the model's ordinary
+Markdown final response. Markdown mode keeps `--json` lifecycle events but
+does not pass PatchBay's `--output-schema`; the parser takes the final
+`agent_message` as the semantic report and never publishes the raw JSONL
+stream. Structured mode keeps the existing schema-constrained command.
+
 ## Desktop handoff
 
 Desktop remains the owner of archive state and the transcript viewer. Before a
@@ -58,6 +65,17 @@ cleanup remains blocked by an untrusted identity, status preserves the answer
 and adds `cleanup_pending: true` plus a machine-readable cleanup warning;
 starting another turn remains fail-closed until local ownership is recovered.
 Other process failures become `failed` with bounded recovery guidance.
+
+For a completed receipt, `report` is the sanitized durable report chunk.
+`report_format` is `structured` or `markdown`, `report_total_length` is the
+stored sanitized length, `report_offset` is the character offset returned,
+`report_next_offset` is the next offset or `null`, and `report_complete`
+indicates whether that response reached the end. `report_capped` indicates
+that the report exceeded the absolute 200,000-character storage cap. Each
+status response accepts an optional `report_offset` and `report_limit` up to
+12,000 characters. Paths below the configured target cwd become repository
+relative; other local paths, configured private values, secret-like content,
+and internal UUIDs are redacted while Markdown formatting is retained.
 
 One target has at most one active turn. Reusing a receipt with the same
 request is idempotent; changing its prompt or options is rejected. A failed or

@@ -142,10 +142,22 @@ operator recovery. The required Desktop handoff and active-writer/archive
 recovery are documented in
 [the compatibility note](../worker-bridge/desktop-task-bridge.md).
 
+Targets use `output_format: structured` by default. A private target may opt
+into `output_format: markdown`, which omits the CLI output schema so the
+visible Desktop task receives Luna's ordinary Markdown final message while
+PatchBay still consumes JSON lifecycle events. Completed status responses
+include a sanitized `report` chunk and `report_format`. The durable report is
+capped at 200,000 Unicode characters; each response is capped at 12,000
+characters. Pass `report_offset` and `report_limit` to retrieve later chunks.
+Responses also include `report_total_length`, `report_next_offset`,
+`report_complete`, and `report_capped`. Structured mode renders every schema
+field into the report so files, tests, risks, and follow-up details are not
+silently omitted.
+
 | Tool | Mutability | Role |
 | --- | --- | --- |
 | `codex_desktop_task_start` | mutating/open-world/non-idempotent | Queue one bounded turn for an allowlisted Desktop task and return its receipt. |
-| `codex_desktop_task_status` | read-only/idempotent | Read queued/running/completed/failed local receipt state and the bounded final answer. |
+| `codex_desktop_task_status` | read-only/idempotent | Read queued/running/completed/failed local receipt state, the bounded final answer, and paged sanitized report chunks. |
 
 ## Natural-Language Worker Tools
 

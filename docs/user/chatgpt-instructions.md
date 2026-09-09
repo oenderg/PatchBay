@@ -16,6 +16,11 @@ local durable receipt, not a normal named-worker call; status monitors the
 local process and returns the bounded answer when complete. On
 `active_writer` or `archived_thread`, recover the state in Desktop and retry
 with a new receipt id.
+For a completed receipt, use the status response's `report` and
+`report_next_offset` fields to reassemble a longer sanitized report with
+`report_offset`; never ask for raw CLI output. A private target configured with
+`output_format: markdown` will show the same ordinary Markdown report in its
+Desktop transcript.
 
 In Hub/edge deployments, the same copied Server URL exposes the exact 31-tool
 Hub manager surface instead of the older single-machine `codex_*` surface. At

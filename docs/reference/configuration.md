@@ -59,6 +59,13 @@ desktop_tasks:
   codex_bin: codex
   timeout_ms: 1800000
   retention_hours: 24
+  # structured preserves the machine-readable result contract. markdown
+  # leaves the final Desktop agent message as ordinary Markdown.
+  # output_format: structured
+
+# Sanitized Desktop reports are capped at 200,000 Unicode characters. Status
+# returns at most 12,000 characters per report chunk; use report_offset and
+# report_limit for later chunks after a completed receipt.
 
 auth:
   enabled: false

@@ -347,6 +347,8 @@ class ToolHandler:
             return await self.desktop_task_client.status(
                 target=args.get("target"),
                 receipt_id=args.get("receipt_id"),
+                report_offset=args.get("report_offset"),
+                report_limit=args.get("report_limit"),
             )
         except DesktopTaskError as error:
             return {
