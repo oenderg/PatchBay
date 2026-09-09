@@ -4746,6 +4746,43 @@ class JobExecutor:
                 ),
                 "retry_without_operator_action": False,
             }
+        # A Desktop task can be replaced or removed while its human alias is
+        # still present in the private targets file. Codex reports that
+        # condition before it can emit a normal lifecycle result. Keep this
+        # pattern narrow so an unrelated missing repository file is not
+        # mistaken for a stale Desktop alias.
+        missing_task = re.search(
+            r"(?:session|thread|task)\b[^\n\r]{0,96}\b(?:not found|does not exist|unknown)"
+            r"|\b(?:not found|does not exist|unknown)\b[^\n\r]{0,96}\b(?:session|thread|task)",
+            normalized,
+        )
+        if missing_task or any(
+            marker in normalized
+            for marker in (
+                "no session found",
+                "no thread found",
+                "no task found",
+                "could not find session",
+                "could not find thread",
+                "could not find task",
+            )
+        ):
+            return {
+                "category": "desktop_task_not_found",
+                "exit_code": exit_code,
+                "public_message": (
+                    "Codex could not find the configured Desktop task; the private alias may be stale."
+                ),
+                "manager_guidance": (
+                    "Confirm the replacement task title in Codex Desktop, update the private mode-0600 "
+                    "targets file locally, restart PatchBay, and retry with a new receipt_id. "
+                    "Do not expose the raw task id to Web."
+                ),
+                "operator_action": (
+                    "Remap the private alias to the current Desktop task and restart PatchBay before retrying."
+                ),
+                "retry_without_operator_action": False,
+            }
         if any(marker in normalized for marker in usage_limit_markers):
             retry_match = re.search(
                 r"(?:try again|retry|resets?)(?:\s+(?:at|after|in))?\s*[:=-]?\s*([^\n\r\"}]{1,80})",

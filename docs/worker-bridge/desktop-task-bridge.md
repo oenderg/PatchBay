@@ -53,6 +53,27 @@ Unknown or live observations, ambiguous marker membership, mismatched process
 structure, or incomplete scans remain blocked; PatchBay never kills an
 unidentified process or manufactures cleanup proof.
 
+If a user replaces a Desktop task, the old alias remains deliberately stale
+until the local operator remaps it. A resume failure that identifies a missing
+task is returned as `desktop_task_not_found` with recovery guidance; no raw task
+id is returned to Web. Run the private helper locally, using the id copied from
+the Codex Desktop task registry, then restart PatchBay:
+
+```bash
+PYTHONPATH=/path/to/PatchBay/src python /path/to/PatchBay/scripts/register_desktop_task.py \
+  --targets-file /private/path/to/desktop-task-targets.json \
+  --alias "MTP Luna" \
+  --thread-id <current-desktop-task-id>
+```
+
+The helper updates an existing alias atomically, rejects duplicate task ids, and
+preserves mode 0600. Pass `--create` only when intentionally adding a new
+allowlisted alias. The command is local operator setup; Web receives only the
+human alias. If the PatchBay listener itself is down, a tunnel can only return a
+transport 502; run the supervised `patchbay start` path or restore local
+readiness before retrying, because no MCP tool can return a structured receipt
+while its server is unreachable.
+
 ## Receipt lifecycle
 
 `codex_desktop_task_start` returns promptly with `queued` or `running`. Read

@@ -600,6 +600,26 @@ async def test_failed_receipt_redacts_process_error_and_classifies_handoff_recov
     assert "/private/tmp" not in json.dumps(status)
 
 
+@pytest.mark.asyncio
+async def test_failed_receipt_reports_stale_alias_recovery_without_task_id(tmp_path):
+    _config, manager, executor, client = make_client(tmp_path)
+    await client.start(target="MTP Luna", receipt_id="stale-alias-1", prompt="Continue.")
+    job = manager.get_job(executor.scheduled[0])
+    assert job is not None
+    manager.update_job_state(
+        job.job_id,
+        JobState.FAILED,
+        error="Session not found",
+        result={"failure_diagnostic": {"category": "desktop_task_not_found"}},
+    )
+
+    status = await client.status(target="MTP Luna", receipt_id="stale-alias-1")
+
+    assert status["error_code"] == "desktop_task_not_found"
+    assert "private alias" in status["error"]
+    assert PRIVATE_THREAD_ID not in json.dumps(status)
+
+
 def test_executor_classifies_desktop_writer_and_archive_failures():
     from patchbay.jobs.executor import JobExecutor
 
@@ -612,6 +632,29 @@ def test_executor_classifies_desktop_writer_and_archive_failures():
     assert archived["category"] == "archived_thread"
     assert "new receipt_id" in active["manager_guidance"]
     assert "new receipt_id" in archived["manager_guidance"]
+
+
+def test_executor_classifies_replaced_or_unmaterialized_desktop_task():
+    from patchbay.jobs.executor import JobExecutor
+
+    executor = object.__new__(JobExecutor)
+    missing = executor._classify_codex_failure(
+        b"",
+        b"Session not found: configured task",
+        1,
+    )
+    assert missing["category"] == "desktop_task_not_found"
+    assert "private" in missing["manager_guidance"]
+    assert "new receipt_id" in missing["manager_guidance"]
+
+    # A missing repository file must not be mistaken for a replaced Desktop
+    # task; the diagnostic needs to remain generic/fail-closed in that case.
+    unrelated = executor._classify_codex_failure(
+        b"",
+        b"README.md does not exist",
+        1,
+    )
+    assert unrelated is None
 
 
 @pytest.mark.asyncio

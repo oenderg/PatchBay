@@ -494,6 +494,10 @@ def _public_error(code: str) -> str:
         "codex_auth_refresh_failed": "Codex authentication failed before the Desktop task could run.",
         "codex_model_unavailable": "Codex rejected the selected model before the Desktop task could run.",
         "codex_workspace_trust_failed": "Codex rejected the Desktop task workspace trust configuration.",
+        "desktop_task_not_found": (
+            "The configured Desktop task was not found. Update the private alias registration to the current "
+            "Desktop task, restart PatchBay, then retry with a new receipt_id."
+        ),
         "codex_usage_limit": "Codex could not run the Desktop task because its current usage quota is exhausted.",
     }
     return messages.get(
