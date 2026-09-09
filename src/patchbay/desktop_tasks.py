@@ -104,7 +104,6 @@ class DesktopTaskOptions:
     profile: str = ""
     skip_git_repo_check: bool = False
     output_format: str = "structured"
-    max_prompt_length: int = DEFAULT_PROMPT_LENGTH
 
 
 def _text(value: Any, *, field: str, maximum: int, required: bool = True) -> str:
@@ -811,7 +810,6 @@ class DesktopTaskClient:
             profile=target.profile,
             skip_git_repo_check=target.skip_git_repo_check,
             output_format=target.output_format,
-            max_prompt_length=target.max_prompt_length,
         )
         digest = _request_digest(alias, prompt, options, timeout_ms)
         with self._lock:
