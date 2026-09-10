@@ -144,9 +144,24 @@ def test_public_surface_is_desktop_named_and_opt_in(tmp_path: Path):
     }
     assert "thread_id" not in by_name[DESKTOP_TASK_START_TOOL_NAME]["inputSchema"]["properties"]
     assert by_name[DESKTOP_TASK_START_TOOL_NAME]["inputSchema"]["properties"]["prompt"]["maxLength"] == MAX_PROMPT_LENGTH_CAP
+    assert by_name[DESKTOP_TASK_START_TOOL_NAME]["inputSchema"]["properties"]["permission_mode"]["enum"] == [
+        "read-only",
+        "workspace-write",
+        "danger-full-access",
+    ]
+    assert "permission_mode_effective" in by_name[DESKTOP_TASK_START_TOOL_NAME]["outputSchema"]["properties"]
     validate_public_tool_arguments(
         DESKTOP_TASK_START_TOOL_NAME,
         {"target": "MTP Luna", "receipt_id": "web-1", "prompt": "Continue."},
+    )
+    validate_public_tool_arguments(
+        DESKTOP_TASK_START_TOOL_NAME,
+        {
+            "target": "MTP Luna",
+            "receipt_id": "web-permission",
+            "prompt": "Continue.",
+            "permission_mode": "danger-full-access",
+        },
     )
     validate_public_tool_arguments(
         DESKTOP_TASK_START_TOOL_NAME,
@@ -193,6 +208,60 @@ def test_desktop_target_output_format_defaults_and_is_strict(tmp_path: Path):
     )
     path.chmod(0o600)
     with pytest.raises(DesktopTaskError, match="output_format is unsupported"):
+        load_desktop_targets(path)
+
+
+def test_desktop_target_permission_allowlist_and_default_are_canonical(tmp_path: Path):
+    path = tmp_path / "targets.json"
+    write_targets(
+        path,
+        aliases={
+            "MTP Luna": {
+                "thread_id": PRIVATE_THREAD_ID,
+                "sandbox": "workspace-write",
+                "allowed_permission_modes": ["workspace-write", "danger-full-access"],
+                "default_permission_mode": "workspace-write",
+            }
+        },
+    )
+    target = load_desktop_targets(path)["MTP Luna"]
+    assert target.allowed_permission_modes == ("workspace-write", "danger-full-access")
+    assert target.default_permission_mode == "workspace-write"
+
+    path.write_text(
+        json.dumps(
+            {
+                "targets": {
+                    "MTP Luna": {
+                        "thread_id": PRIVATE_THREAD_ID,
+                        "allowed_permission_modes": ["workspace-write"],
+                        "default_permission_mode": "danger-full-access",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    with pytest.raises(DesktopTaskError, match="must be in allowed_permission_modes"):
+        load_desktop_targets(path)
+
+    path.write_text(
+        json.dumps(
+            {
+                "targets": {
+                    "MTP Luna": {
+                        "thread_id": PRIVATE_THREAD_ID,
+                        "allowed_permission_modes": ["workspace-write", "full-access"],
+                        "default_permission_mode": "workspace-write",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    with pytest.raises(DesktopTaskError, match="unsupported"):
         load_desktop_targets(path)
 
 
@@ -407,6 +476,73 @@ async def test_start_returns_queued_quickly_and_enforces_receipt_and_target_idem
     job = manager.get_job(executor.scheduled[0])
     assert job is not None
     assert PRIVATE_THREAD_ID in json.dumps(job.options)
+
+
+@pytest.mark.asyncio
+async def test_permission_mode_is_per_receipt_and_does_not_change_alias_default(tmp_path: Path):
+    config, manager, executor, _unused_client = make_client(tmp_path)
+    target = make_target(
+        allowed_permission_modes=("workspace-write", "danger-full-access"),
+        default_permission_mode="workspace-write",
+    )
+    client = DesktopTaskClient(config, manager, executor, {"MTP Luna": target})
+
+    default_result = await client.start(
+        target="MTP Luna",
+        receipt_id="permission-default",
+        prompt="Use the alias default.",
+    )
+    assert default_result["permission_mode_requested"] is None
+    assert default_result["permission_mode_effective"] == "workspace-write"
+    first_job = manager.get_job(executor.scheduled[0])
+    assert first_job is not None
+    assert first_job.options["sandbox"] == "workspace-write"
+    assert first_job.options["_desktop_task_permission_mode_requested"] == ""
+
+    manager.update_job_state(first_job.job_id, JobState.COMPLETED, result={"summary": "done"})
+    explicit_result = await client.start(
+        target="MTP Luna",
+        receipt_id="permission-full",
+        prompt="Use full access for this one turn.",
+        permission_mode="danger-full-access",
+    )
+    assert explicit_result["permission_mode_requested"] == "danger-full-access"
+    assert explicit_result["permission_mode_effective"] == "danger-full-access"
+    second_job = manager.get_job(executor.scheduled[1])
+    assert second_job is not None
+    assert second_job.options["sandbox"] == "danger-full-access"
+    assert target.default_permission_mode == "workspace-write"
+
+    with pytest.raises(DesktopTaskError, match="not allowed"):
+        await client.start(
+            target="MTP Luna",
+            receipt_id="permission-rejected",
+            prompt="Do not run this.",
+            permission_mode="read-only",
+        )
+
+
+@pytest.mark.asyncio
+async def test_permission_mode_is_part_of_receipt_idempotency_digest(tmp_path: Path):
+    config, manager, executor, _unused_client = make_client(tmp_path)
+    target = make_target(
+        allowed_permission_modes=("workspace-write", "danger-full-access"),
+        default_permission_mode="workspace-write",
+    )
+    client = DesktopTaskClient(config, manager, executor, {"MTP Luna": target})
+    await client.start(
+        target="MTP Luna",
+        receipt_id="permission-digest",
+        prompt="Same prompt.",
+        permission_mode="workspace-write",
+    )
+    with pytest.raises(DesktopTaskError, match="already used"):
+        await client.start(
+            target="MTP Luna",
+            receipt_id="permission-digest",
+            prompt="Same prompt.",
+            permission_mode="danger-full-access",
+        )
 
 
 @pytest.mark.asyncio
@@ -958,8 +1094,11 @@ async def test_periodic_manager_cleanup_uses_desktop_retention_bound(tmp_path):
 async def test_handler_dispatches_new_start_and_status_surface(monkeypatch):
     from patchbay.tools.handler import ToolHandler
 
+    seen = {}
+
     class FakeClient:
         async def start(self, **kwargs):
+            seen.update(kwargs)
             return {"ok": False, "state": "queued", "target": kwargs["target"]}
 
         async def status(self, **kwargs):
@@ -973,7 +1112,12 @@ async def test_handler_dispatches_new_start_and_status_surface(monkeypatch):
     handler._reconcile_active_jobs = no_reconciliation
     started = await handler.handle_tool_call(
         DESKTOP_TASK_START_TOOL_NAME,
-        {"target": "MTP Luna", "receipt_id": "handler-1", "prompt": "Continue."},
+        {
+            "target": "MTP Luna",
+            "receipt_id": "handler-1",
+            "prompt": "Continue.",
+            "permission_mode": "danger-full-access",
+        },
     )
     status = await handler.handle_tool_call(
         DESKTOP_TASK_STATUS_TOOL_NAME,
@@ -981,3 +1125,4 @@ async def test_handler_dispatches_new_start_and_status_surface(monkeypatch):
     )
     assert started["state"] == "queued"
     assert status["state"] == "completed"
+    assert seen["permission_mode"] == "danger-full-access"

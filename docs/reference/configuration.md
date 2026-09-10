@@ -70,6 +70,9 @@ desktop_tasks:
 #   "handoff_mode": "manual"          # default; Desktop archive -> unarchive is operator-driven
 #   "handoff_mode": "app_server"      # opt-in official app-server handoff
 #   "app_server_socket": "/private/path/to/codex-app-server.sock"
+#   "sandbox": "workspace-write"      # legacy/default sandbox field
+#   "allowed_permission_modes": ["workspace-write", "danger-full-access"]
+#   "default_permission_mode": "workspace-write"
 # app_server mode requires an absolute Unix socket for a supervised Codex
 # app-server using the same Codex home/task store. `codex app-server
 # --listen unix://` is the supported local setup. Do not point this at the

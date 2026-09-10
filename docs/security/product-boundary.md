@@ -49,6 +49,12 @@ configured private values, secret-like content, and internal UUIDs are
 redacted, and the durable report is capped at 200,000 Unicode characters with
 12,000-character status chunks. The visible Desktop transcript remains the
 native Codex surface; PatchBay does not rewrite it.
+Each alias may privately allow a bounded set of canonical Codex sandbox modes
+and choose a default. A public start request can select one allowed mode for
+that receipt only; PatchBay persists requested/effective values in the durable
+job options and returns them in receipt/status responses. The request cannot
+change the alias allowlist or default, and the executor reasserts the selected
+mode immediately before `resume`.
 
 Hub transport identity has two deliberate layers. The current Edge-session
 contract authenticates the live connection, while every claimed attempt and

@@ -161,6 +161,13 @@ silently omitted.
 
 The public start schema accepts at most 16,000 Unicode characters. A private
 target may set `max_prompt_length` to a lower value; the default is 12,000.
+The optional `permission_mode` field accepts the canonical Codex values
+`read-only`, `workspace-write`, and `danger-full-access`. The private alias
+allowlist decides whether a requested one-turn mode is accepted; omission uses
+the alias default. Start and status responses include
+`permission_mode_requested` and `permission_mode_effective`, and the durable
+receipt stores both for audit/restart recovery. A request cannot change the
+private allowlist or default.
 
 | Tool | Mutability | Role |
 | --- | --- | --- |

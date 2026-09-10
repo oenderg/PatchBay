@@ -12,6 +12,16 @@ targets are configured. Each underlying Desktop task id may appear only once
 in that file. A target entry contains the private Desktop task id and may pin its cwd, model, reasoning effort,
 sandbox, profile, and `skip_git_repo_check`. Do not commit the targets file.
 
+An alias may additionally declare a private `allowed_permission_modes` list
+and `default_permission_mode`, using the Codex canonical values `read-only`,
+`workspace-write`, and `danger-full-access`. When a start call omits
+`permission_mode`, the alias default applies. A caller may request one mode
+for one receipt only when it is in that alias allowlist; the requested and
+effective modes are persisted and returned in receipt/status output, and a
+request never changes the next-turn default or the allowlist. Legacy targets
+without these fields retain their existing `sandbox` value as a one-mode
+default.
+
 Each target may also set `max_prompt_length` (default 12,000 Unicode
 characters, hard cap 16,000). This private per-alias limit lets long,
 human-readable engineering briefs pass the public MCP schema while an
@@ -42,6 +52,11 @@ Markdown final response. Markdown mode keeps `--json` lifecycle events but
 does not pass PatchBay's `--output-schema`; the parser takes the final
 `agent_message` as the semantic report and never publishes the raw JSONL
 stream. Structured mode keeps the existing schema-constrained command.
+
+The per-dispatch mode is passed to the same `codex exec resume` command as
+`--sandbox`. `danger-full-access` is the supported Codex CLI value for an
+unrestricted command sandbox; `full-access` is not accepted. The private
+allowlist is the security boundary, so public callers cannot broaden it.
 
 ## Desktop handoff
 

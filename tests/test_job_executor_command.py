@@ -205,6 +205,26 @@ def test_desktop_resume_can_use_private_cli_and_skip_git_repo_check(tmp_path):
     assert cmd[-2:] == ["00000000-0000-7000-8000-000000000001", "-"]
 
 
+def test_desktop_resume_uses_canonical_full_access_permission_mode(tmp_path):
+    executor = make_executor(tmp_path)
+
+    cmd = executor._build_codex_command(
+        "resume",
+        "one turn",
+        str(tmp_path),
+        {
+            "_desktop_task": True,
+            "sandbox": "danger-full-access",
+            "_desktop_task_permission_mode_effective": "danger-full-access",
+            "resume_session_id": "00000000-0000-7000-8000-000000000001",
+            "_codex_cwd": str(tmp_path),
+        },
+    )
+
+    assert cmd[cmd.index("--sandbox") + 1] == "danger-full-access"
+    assert cmd.index("--sandbox") < cmd.index("resume")
+
+
 def test_desktop_markdown_resume_keeps_json_events_without_schema(tmp_path):
     executor = make_executor(tmp_path)
 

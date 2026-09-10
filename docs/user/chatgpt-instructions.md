@@ -26,6 +26,11 @@ For a completed receipt, use the status response's `report` and
 `report_offset`; never ask for raw CLI output. A private target configured with
 `output_format: markdown` will show the same ordinary Markdown report in its
 Desktop transcript.
+When a user explicitly authorizes a different sandbox for one turn, pass
+`permission_mode` only with a value the private alias is known to allow:
+`read-only`, `workspace-write`, or Codex's canonical `danger-full-access`.
+Omitting it uses the alias default. The response reports requested/effective
+mode; the public call cannot change the alias policy for later turns.
 
 In Hub/edge deployments, the same copied Server URL exposes the exact 31-tool
 Hub manager surface instead of the older single-machine `codex_*` surface. At

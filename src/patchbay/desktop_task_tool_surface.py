@@ -18,6 +18,14 @@ DESKTOP_TASK_OUTPUT_SCHEMA: Dict[str, Any] = {
         "target": {"type": "string"},
         "receipt_id": {"type": "string"},
         "state": {"type": "string", "enum": ["queued", "running", "completed", "failed"]},
+        "permission_mode_requested": {
+            "type": ["string", "null"],
+            "description": "The one-turn mode requested by the caller, or null when the alias default was used.",
+        },
+        "permission_mode_effective": {
+            "type": ["string", "null"],
+            "description": "The private allowlisted Codex sandbox mode applied to this receipt.",
+        },
         "answer": {"type": "string"},
         "answer_truncated": {"type": "boolean"},
         "report_format": {"type": "string", "enum": ["structured", "markdown"]},
@@ -63,6 +71,9 @@ DESKTOP_TASK_START_TOOL: Dict[str, Any] = {
         "For manual aliases, the operator must archive the task in Desktop, unarchive it in Desktop, then leave it idle/unloaded before starting. "
         "For app-server aliases, PatchBay performs that sequence through the private configured Codex app-server and verifies idle/notLoaded readiness. "
         "Desktop remains the transcript viewer. PatchBay never edits session files or uses CLI archive/unarchive fallbacks. "
+        "The optional permission_mode requests one Codex sandbox mode for this receipt only; it must be in the private alias allowlist "
+        "(read-only, workspace-write, or danger-full-access), and omission uses the alias default for this turn. "
+        "The response reports requested and effective modes; a request never changes the alias default. "
         "active_writer and archived_thread failures require Desktop recovery and a new receipt_id. "
         "The feature exists only when desktop_tasks.enabled=true and a private targets_file are configured."
     ),
@@ -82,6 +93,14 @@ DESKTOP_TASK_START_TOOL: Dict[str, Any] = {
             "timeout_ms": {
                 "type": "integer",
                 "description": "Optional bounded local execution timeout; capped by desktop_tasks.timeout_ms.",
+            },
+            "permission_mode": {
+                "type": "string",
+                "enum": ["read-only", "workspace-write", "danger-full-access"],
+                "description": (
+                    "Optional one-turn Codex sandbox mode. The private alias allowlist decides whether it is accepted; "
+                    "omitting it uses the alias default."
+                ),
             },
         },
         "required": ["target", "receipt_id", "prompt"],

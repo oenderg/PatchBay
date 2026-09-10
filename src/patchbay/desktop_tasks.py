@@ -67,6 +67,8 @@ DESKTOP_TASK_DIGEST_OPTION = "_desktop_task_request_digest"
 DESKTOP_TASK_TIMEOUT_OPTION = "_desktop_task_timeout_ms"
 DESKTOP_TASK_CODEX_BIN_OPTION = "_desktop_task_codex_bin"
 DESKTOP_TASK_OUTPUT_FORMAT_OPTION = "_desktop_task_output_format"
+DESKTOP_TASK_PERMISSION_REQUESTED_OPTION = "_desktop_task_permission_mode_requested"
+DESKTOP_TASK_PERMISSION_EFFECTIVE_OPTION = "_desktop_task_permission_mode_effective"
 DESKTOP_TASK_HANDOFF_MODE_OPTION = "_desktop_task_handoff_mode"
 DESKTOP_TASK_HANDOFF_SOCKET_OPTION = "_desktop_task_handoff_socket"
 DESKTOP_TASK_HANDOFF_STATE_OPTION = "_desktop_task_handoff_state"
@@ -105,6 +107,8 @@ class DesktopTaskTarget:
     max_prompt_length: int = DEFAULT_PROMPT_LENGTH
     handoff_mode: str = "manual"
     app_server_socket: str = ""
+    allowed_permission_modes: tuple[str, ...] = ()
+    default_permission_mode: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -118,6 +122,8 @@ class DesktopTaskOptions:
     output_format: str = "structured"
     handoff_mode: str = "manual"
     app_server_socket: str = ""
+    permission_mode_requested: str = ""
+    permission_mode_effective: str = ""
 
 
 def _text(value: Any, *, field: str, maximum: int, required: bool = True) -> str:
@@ -170,6 +176,72 @@ def _sandbox(value: Any) -> str:
     if result and result not in _SANDBOXES:
         raise DesktopTaskError("sandbox is unsupported")
     return result
+
+
+def _permission_mode(value: Any, *, field: str = "permission_mode") -> str:
+    """Validate one Codex sandbox mode used for a Desktop turn."""
+    result = _text(value, field=field, maximum=32, required=False).strip().lower()
+    if result and result not in _SANDBOXES:
+        raise DesktopTaskError(f"{field} is unsupported")
+    return result
+
+
+def _permission_allowlist(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise DesktopTaskError("allowed_permission_modes must be a non-empty list")
+    if len(value) > len(_SANDBOXES):
+        raise DesktopTaskError("allowed_permission_modes contains too many values")
+    modes = tuple(_permission_mode(item, field="allowed_permission_modes item") for item in value)
+    if any(not mode for mode in modes):
+        raise DesktopTaskError("allowed_permission_modes cannot contain an empty value")
+    if len(set(modes)) != len(modes):
+        raise DesktopTaskError("allowed_permission_modes contains a duplicate")
+    return modes
+
+
+def _requested_permission_mode(value: Any) -> str:
+    if value is None:
+        return ""
+    return _permission_mode(value)
+
+
+def _target_permission_defaults(value: Mapping[str, Any], sandbox: str) -> tuple[tuple[str, ...], str]:
+    """Parse the private per-alias permission allowlist and default.
+
+    Legacy targets without the new fields retain their existing sandbox as a
+    one-value default. New targets must declare both the allowlist and its
+    default, which prevents a private operator from accidentally making a
+    newly permitted mode the implicit mode.
+    """
+    raw_allowed = value.get("allowed_permission_modes")
+    raw_default = value.get("default_permission_mode")
+    if raw_allowed is None:
+        default = _permission_mode(
+            sandbox if raw_default is None else raw_default,
+            field="default_permission_mode",
+        )
+        return ((default,) if default else ()), default
+    if raw_default is None:
+        raise DesktopTaskError(
+            "default_permission_mode is required when allowed_permission_modes is configured"
+        )
+    allowed = _permission_allowlist(raw_allowed)
+    default = _permission_mode(raw_default, field="default_permission_mode")
+    if not default or default not in allowed:
+        raise DesktopTaskError("default_permission_mode must be in allowed_permission_modes")
+    return allowed, default
+
+
+def _effective_permission_mode(target: DesktopTaskTarget, requested: str) -> str:
+    allowed = target.allowed_permission_modes
+    default = target.default_permission_mode or target.sandbox
+    if requested:
+        if not allowed or requested not in allowed:
+            raise DesktopTaskError("permission_mode is not allowed for this target")
+        return requested
+    if default and allowed and default not in allowed:
+        raise DesktopTaskError("target permission configuration is invalid")
+    return default
 
 
 def _profile(value: Any) -> str:
@@ -274,19 +346,23 @@ def _target(alias: str, value: Any) -> DesktopTaskTarget:
         return DesktopTaskTarget(alias=alias, thread_id=_thread_id(value))
     if not isinstance(value, Mapping):
         raise DesktopTaskError("allowlist targets must be thread ids or objects")
+    sandbox = _sandbox(value.get("sandbox", ""))
+    allowed_permission_modes, default_permission_mode = _target_permission_defaults(value, sandbox)
     target = DesktopTaskTarget(
         alias=alias,
         thread_id=_thread_id(value.get("thread_id", value.get("session_id"))),
         cwd=_cwd(value.get("cwd", "")),
         model=_model(value.get("model", "")),
         reasoning_effort=_reasoning(value.get("reasoning_effort", "")),
-        sandbox=_sandbox(value.get("sandbox", "")),
+        sandbox=sandbox,
         profile=_profile(value.get("profile", "")),
         skip_git_repo_check=_bool(value.get("skip_git_repo_check", False), "skip_git_repo_check"),
         output_format=_output_format(value.get("output_format", "structured")),
         max_prompt_length=_prompt_length(value.get("max_prompt_length")),
         handoff_mode=_handoff_mode(value.get("handoff_mode", "manual")),
         app_server_socket=_app_server_socket(value.get("app_server_socket", "")),
+        allowed_permission_modes=allowed_permission_modes,
+        default_permission_mode=default_permission_mode,
     )
     if target.handoff_mode == "app_server" and not target.app_server_socket:
         raise DesktopTaskError("app_server_socket is required for app_server handoff_mode")
@@ -795,6 +871,17 @@ class DesktopTaskClient:
             "target": target.alias,
             "receipt_id": str((job.options or {}).get(DESKTOP_TASK_RECEIPT_OPTION) or ""),
             "state": state,
+            "permission_mode_requested": (
+                str((job.options or {}).get(DESKTOP_TASK_PERMISSION_REQUESTED_OPTION) or "") or None
+            ),
+            "permission_mode_effective": (
+                str(
+                    (job.options or {}).get(DESKTOP_TASK_PERMISSION_EFFECTIVE_OPTION)
+                    or (job.options or {}).get("sandbox")
+                    or ""
+                )
+                or None
+            ),
         }
         if job.event_count:
             result["event_count"] = int(job.event_count)
@@ -835,20 +922,33 @@ class DesktopTaskClient:
             result["warning"] = "Codex persisted a final answer before its wrapper exited nonzero; the answer was retained."
         return result
 
-    def _options(self, target: DesktopTaskTarget, alias: str, receipt_id: str, digest: str, timeout_ms: int) -> dict[str, Any]:
+    def _options(
+        self,
+        target: DesktopTaskTarget,
+        alias: str,
+        receipt_id: str,
+        digest: str,
+        timeout_ms: int,
+        *,
+        permission_mode_requested: str = "",
+        permission_mode_effective: str = "",
+    ) -> dict[str, Any]:
         overrides = []
         if target.reasoning_effort:
             overrides.append(build_reasoning_config_override(target.reasoning_effort))
+        effective = permission_mode_effective or target.default_permission_mode or target.sandbox
         return {
             "resume_session_id": target.thread_id,
             "_codex_cwd": target.cwd,
             "model": target.model,
-            "sandbox": target.sandbox,
+            "sandbox": effective,
             "profile": target.profile,
             "structured_output": True,
             "json_events": True,
             "skip_git_repo_check": target.skip_git_repo_check,
             DESKTOP_TASK_OUTPUT_FORMAT_OPTION: target.output_format,
+            DESKTOP_TASK_PERMISSION_REQUESTED_OPTION: permission_mode_requested,
+            DESKTOP_TASK_PERMISSION_EFFECTIVE_OPTION: effective,
             DESKTOP_TASK_HANDOFF_MODE_OPTION: target.handoff_mode,
             DESKTOP_TASK_HANDOFF_SOCKET_OPTION: target.app_server_socket,
             DESKTOP_TASK_HANDOFF_STATE_OPTION: (
@@ -865,17 +965,30 @@ class DesktopTaskClient:
             DESKTOP_TASK_CODEX_BIN_OPTION: self.codex_bin,
         }
 
-    def _create_job(self, alias: str, receipt_id: str, prompt: str, target: DesktopTaskTarget, timeout_ms: int) -> JobInfo:
+    def _create_job(
+        self,
+        alias: str,
+        receipt_id: str,
+        prompt: str,
+        target: DesktopTaskTarget,
+        timeout_ms: int,
+        *,
+        permission_mode_requested: str = "",
+        permission_mode_effective: str = "",
+    ) -> JobInfo:
+        effective = permission_mode_effective or target.default_permission_mode or target.sandbox
         options = DesktopTaskOptions(
             cwd=target.cwd,
             model=target.model,
             reasoning_effort=target.reasoning_effort,
-            sandbox=target.sandbox,
+            sandbox=effective,
             profile=target.profile,
             skip_git_repo_check=target.skip_git_repo_check,
             output_format=target.output_format,
             handoff_mode=target.handoff_mode,
             app_server_socket=target.app_server_socket,
+            permission_mode_requested=permission_mode_requested,
+            permission_mode_effective=effective,
         )
         digest = _request_digest(alias, prompt, options, timeout_ms)
         with self._lock:
@@ -915,7 +1028,15 @@ class DesktopTaskClient:
                     "resume",
                     prompt,
                     repo_path,
-                    self._options(target, alias, receipt_id, digest, timeout_ms),
+                    self._options(
+                        target,
+                        alias,
+                        receipt_id,
+                        digest,
+                        timeout_ms,
+                        permission_mode_requested=permission_mode_requested,
+                        permission_mode_effective=effective,
+                    ),
                 )
             except RuntimeError as exc:
                 raise DesktopTaskError("PatchBay's local job capacity is full; wait and retry with a new receipt_id") from exc
@@ -978,13 +1099,26 @@ class DesktopTaskClient:
         except Exception:
             return self._fail_handoff(job, "desktop_handoff_failed")
 
-    async def start(self, *, target: Any, receipt_id: Any, prompt: Any, timeout_ms: Any = None) -> dict[str, Any]:
+    async def start(
+        self,
+        *,
+        target: Any,
+        receipt_id: Any,
+        prompt: Any,
+        timeout_ms: Any = None,
+        permission_mode: Any = None,
+    ) -> dict[str, Any]:
         async with self._start_lock:
             alias = _alias(target)
             receipt = _receipt(receipt_id)
             target_record = self.targets.get(alias)
             if target_record is None:
                 raise DesktopTaskError("target alias is not allowlisted")
+            requested_permission_mode = _requested_permission_mode(permission_mode)
+            effective_permission_mode = _effective_permission_mode(
+                target_record,
+                requested_permission_mode,
+            )
             message = _text(prompt, field="prompt", maximum=target_record.max_prompt_length)
             bounded_timeout = _bounded_int(
                 timeout_ms,
@@ -1000,6 +1134,8 @@ class DesktopTaskClient:
                 message,
                 target_record,
                 bounded_timeout,
+                permission_mode_requested=requested_permission_mode,
+                permission_mode_effective=effective_permission_mode,
             )
             # A durable terminal receipt is the idempotent result.  Never
             # repeat its handoff or schedule a second Desktop turn.
@@ -1122,6 +1258,8 @@ __all__ = [
     "DesktopTaskError",
     "DesktopTaskOptions",
     "DesktopTaskTarget",
+    "DESKTOP_TASK_PERMISSION_EFFECTIVE_OPTION",
+    "DESKTOP_TASK_PERMISSION_REQUESTED_OPTION",
     "MAX_ANSWER_LENGTH",
     "MAX_REPORT_CHUNK_LENGTH",
     "MAX_REPORT_LENGTH",

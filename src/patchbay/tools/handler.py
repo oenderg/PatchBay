@@ -325,6 +325,7 @@ class ToolHandler:
                 receipt_id=args.get("receipt_id"),
                 prompt=args.get("prompt"),
                 timeout_ms=args.get("timeout_ms"),
+                permission_mode=args.get("permission_mode"),
             )
         except DesktopTaskError as error:
             return {
