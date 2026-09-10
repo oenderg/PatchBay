@@ -22,6 +22,9 @@ from patchbay.security import internal_log_error, redact_sensitive_output, valid
 
 logger = logging.getLogger(__name__)
 JOB_PERSISTENCE_VERSION = 2
+SERVER_SHUTDOWN_CANCELLATION_ERROR = (
+    "Server shut down before the job completed."
+)
 
 
 class JobState(str, Enum):
@@ -554,6 +557,74 @@ class JobManager:
                     self._persist_job(job)
                 return False
             self.update_job_state(job_id, state, **kwargs)
+            return True
+
+    def recover_shutdown_completed_job(
+        self,
+        job_id: str,
+        *,
+        result: Dict[str, Any],
+        terminal_source: str,
+        terminal_observed_at: float,
+        wrapper_cleanup_outcome: str = "cleanup_pending",
+        last_heartbeat_at: Optional[float] = None,
+        last_event: Optional[str] = None,
+    ) -> bool:
+        """Recover completion evidence that predates a server-shutdown cancel.
+
+        A listener shutdown deliberately records cancellation before it stops
+        live subprocesses.  If the restarted observer later proves that the
+        Codex turn completed *before* that cancellation, this narrowly scoped
+        transition restores the semantic result.  Other terminal decisions
+        retain the normal first-terminal-wins rule.
+        """
+
+        if terminal_source not in {"session_task_complete", "stdout_turn_completed"}:
+            return False
+        try:
+            completion_at = float(terminal_observed_at)
+        except (TypeError, ValueError):
+            return False
+        with self._state_lock:
+            job = self.jobs.get(job_id)
+            if job is None or job.state != JobState.CANCELLED:
+                return False
+            if job.terminal_source != "manager_cancellation":
+                return False
+            if str(job.error or "") != SERVER_SHUTDOWN_CANCELLATION_ERROR:
+                return False
+            try:
+                cancelled_at = float(job.terminal_observed_at)
+            except (TypeError, ValueError):
+                return False
+            # The observer's timestamp is the causal proof.  A report found
+            # after the cancellation remains a late completion and must not
+            # overwrite an ordinary cancellation.
+            if completion_at > cancelled_at + 1e-6:
+                return False
+            if not isinstance(result, dict) or not result:
+                return False
+
+            job.state = JobState.COMPLETED
+            job.completed_at = completion_at
+            job.error = None
+            job.result = dict(result)
+            job.terminal_source = terminal_source
+            job.terminal_observed_at = completion_at
+            job.wrapper_cleanup_outcome = wrapper_cleanup_outcome
+            job.last_heartbeat_at = (
+                float(last_heartbeat_at)
+                if last_heartbeat_at is not None
+                else time.time()
+            )
+            if last_event:
+                job.last_event = str(last_event)
+            # Preserve the original shutdown cancellation as an audit trail;
+            # it is the terminal decision being repaired, not a new retry.
+            job.late_terminal_source = "server_shutdown_cancellation_recovered"
+            job.late_terminal_observed_at = cancelled_at
+            self._normalize_terminal_job(job)
+            self._persist_job(job)
             return True
 
     def record_completion_evidence(

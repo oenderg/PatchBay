@@ -17,7 +17,11 @@ from patchbay.jobs.executor import (
     JobExecutor,
     terminal_cleanup_pending,
 )
-from patchbay.jobs.manager import JobManager, JobState
+from patchbay.jobs.manager import (
+    SERVER_SHUTDOWN_CANCELLATION_ERROR,
+    JobManager,
+    JobState,
+)
 from patchbay.jobs.process_supervisor import cleanup_proof_budget_seconds
 from patchbay.jobs.session_terminal import CodexSessionTerminalObserver
 from patchbay.repo_locks import RepoMutationBusy, mark_repo_lock_options
@@ -763,6 +767,92 @@ def test_observer_ignores_prior_turn_and_accepts_new_turn_in_same_session(tmp_pa
     snapshot = observer.poll()
     assert snapshot.completed is True
     assert snapshot.final_message == "current turn"
+
+
+def test_observer_selects_unique_post_start_rollout_for_resumed_desktop_session(
+    tmp_path,
+):
+    config = make_config(tmp_path)
+    session_id = "session-desktop-resume"
+    session_root = tmp_path / "codex-home" / "sessions" / "2026" / "07" / "11"
+    session_root.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+
+    def write_rollout(path, timestamp, message):
+        iso = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+        path.write_text(
+            "\n".join(
+                json.dumps(value)
+                for value in (
+                    {
+                        "timestamp": iso,
+                        "type": "session_meta",
+                        "payload": {"id": session_id},
+                    },
+                    {
+                        "timestamp": iso,
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "last_agent_message": message,
+                        },
+                    },
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    write_rollout(session_root / f"aborted-{session_id}.jsonl", now - 300, "old turn")
+    current = session_root / f"resumed-{session_id}_turn.jsonl"
+    write_rollout(current, now, "resumed turn")
+
+    observer = CodexSessionTerminalObserver(
+        config, session_id, not_before=now - 2
+    )
+
+    snapshot = observer.poll()
+
+    assert snapshot.completed is True
+    assert snapshot.final_message == "resumed turn"
+
+
+def test_observer_keeps_multiple_post_start_rollouts_fail_closed(tmp_path):
+    config = make_config(tmp_path)
+    session_id = "session-ambiguous-resume"
+    session_root = tmp_path / "codex-home" / "sessions" / "2026" / "07" / "11"
+    session_root.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    iso = datetime.fromtimestamp(now, timezone.utc).isoformat()
+    for name, message in (("first", "first"), ("second", "second")):
+        (session_root / f"{name}-{session_id}.jsonl").write_text(
+            "\n".join(
+                json.dumps(value)
+                for value in (
+                    {
+                        "timestamp": iso,
+                        "type": "session_meta",
+                        "payload": {"id": session_id},
+                    },
+                    {
+                        "timestamp": iso,
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "last_agent_message": message,
+                        },
+                    },
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    observer = CodexSessionTerminalObserver(
+        config, session_id, not_before=now - 2
+    )
+
+    assert observer.poll().completed is False
 
 
 def test_observer_prime_to_end_ignores_existing_terminal_marker(tmp_path):
@@ -2937,6 +3027,136 @@ def test_restart_recovery_uses_persisted_resume_observation_offset(tmp_path):
     recovered = restarted_manager.get_job(job_id)
     assert recovered.state == JobState.COMPLETED
     assert recovered.result["summary"] == "NEW_RESTART_TURN"
+
+
+def test_reconciliation_recovers_completion_before_server_shutdown_cancel(
+    tmp_path,
+):
+    config = make_config(tmp_path)
+    manager = JobManager(config)
+    executor = JobExecutor(config, manager)
+    session_id = "session-shutdown-recovery"
+    codex_home = tmp_path / "codex-home"
+    session_root = codex_home / "sessions" / "2026" / "07" / "11"
+    session_root.mkdir(parents=True, exist_ok=True)
+    completed_at = time.time() - 10
+    old_rollout = session_root / f"rollout-old-{session_id}.jsonl"
+    new_rollout = session_root / f"rollout-resumed-{session_id}.jsonl"
+
+    def write_rollout(path, timestamp, summary):
+        records = [
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": "/fixture"},
+            },
+            {
+                "timestamp": datetime.fromtimestamp(
+                    timestamp, timezone.utc
+                ).isoformat(),
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "last_agent_message": json.dumps(full_result(summary)),
+                },
+            },
+        ]
+        path.write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n",
+            encoding="utf-8",
+        )
+
+    # The old aborted rollout is before the process boundary. The resumed
+    # rollout is the only candidate with post-start completion activity.
+    write_rollout(old_rollout, completed_at - 20, "OLD_ROLLOUT")
+    write_rollout(new_rollout, completed_at, "RESUMED_ROLLOUT")
+    job_id = manager.create_job(
+        "resume",
+        "recover after listener restart",
+        config["repositories"]["default"],
+        {"json_events": True, "resume_session_id": session_id},
+    )
+    process_started_at = completed_at - 1
+    manager.update_job_state(
+        job_id,
+        JobState.RUNNING,
+        started_at=process_started_at,
+        process_started_at=process_started_at,
+    )
+    cancellation_at = time.time()
+    assert manager.transition_job_terminal(
+        job_id,
+        JobState.CANCELLED,
+        error=SERVER_SHUTDOWN_CANCELLATION_ERROR,
+        terminal_source="manager_cancellation",
+        terminal_observed_at=cancellation_at,
+        result={"summary": "shutdown cancellation", "files_changed": []},
+        wrapper_cleanup_outcome="cleanup_pending",
+    )
+
+    reconciliation = executor.reconcile_stale_running_jobs(grace_seconds=0)
+
+    recovered = manager.get_job(job_id)
+    assert reconciliation["recovered_completed_job_ids"] == [job_id]
+    assert recovered.state == JobState.COMPLETED
+    assert recovered.result["summary"] == "RESUMED_ROLLOUT"
+    assert recovered.terminal_source == "session_task_complete"
+    assert recovered.late_terminal_source == (
+        "server_shutdown_cancellation_recovered"
+    )
+
+
+def test_shutdown_recovery_rejects_completion_after_cancellation(tmp_path):
+    config = make_config(tmp_path)
+    manager = JobManager(config)
+    executor = JobExecutor(config, manager)
+    session_id = "session-shutdown-late-completion"
+    completed_at = time.time() + 10
+    source = write_session(
+        tmp_path / "codex-home",
+        session_id,
+        [
+            {
+                "timestamp": datetime.fromtimestamp(
+                    completed_at, timezone.utc
+                ).isoformat(),
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "last_agent_message": json.dumps(full_result("TOO_LATE")),
+                },
+            }
+        ],
+    )
+    job_id = manager.create_job(
+        "resume",
+        "do not recover late completion",
+        config["repositories"]["default"],
+        {"json_events": True, "resume_session_id": session_id},
+    )
+    started_at = time.time()
+    manager.update_job_state(
+        job_id,
+        JobState.RUNNING,
+        started_at=started_at,
+        process_started_at=started_at,
+    )
+    cancellation_at = time.time()
+    manager.transition_job_terminal(
+        job_id,
+        JobState.CANCELLED,
+        error=SERVER_SHUTDOWN_CANCELLATION_ERROR,
+        terminal_source="manager_cancellation",
+        terminal_observed_at=cancellation_at,
+        result={"summary": "shutdown cancellation", "files_changed": []},
+        wrapper_cleanup_outcome="cleanup_pending",
+    )
+
+    assert executor._recover_completed_session(manager.get_job(job_id)) is False
+    recovered = manager.get_job(job_id)
+    assert recovered.state == JobState.CANCELLED
+    assert recovered.result["summary"] == "shutdown cancellation"
+    assert source.exists()
 
 
 def test_first_terminal_decision_wins_and_late_source_is_recorded(tmp_path):

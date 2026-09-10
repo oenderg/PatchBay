@@ -25,6 +25,7 @@ from patchbay.codex_home import resolve_codex_home
 from patchbay.jobs.manager import (
     JobManager,
     JobState,
+    SERVER_SHUTDOWN_CANCELLATION_ERROR,
     terminal_cleanup_pending,
     terminal_cleanup_recovery_required,
 )
@@ -235,6 +236,17 @@ class JobExecutor:
         cleanup_reconciled: list[str] = []
 
         for job_id, job in list(self.job_manager.jobs.items()):
+            # A listener restart records a shutdown cancellation before it
+            # stops the old executor.  Recover only when the exact session
+            # observer proves that the semantic turn completed earlier; all
+            # other terminal states retain first-terminal-wins semantics.
+            if (
+                job.state == JobState.CANCELLED
+                and str(job.error or "") == SERVER_SHUTDOWN_CANCELLATION_ERROR
+                and self._recover_completed_session(job, event_loop=event_loop)
+            ):
+                recovered_completed.append(job_id)
+                job = self.job_manager.get_job(job_id) or job
             if job.state in {
                 JobState.COMPLETED,
                 JobState.FAILED,
@@ -369,12 +381,26 @@ class JobExecutor:
         *,
         event_loop: Optional[asyncio.AbstractEventLoop] = None,
     ) -> bool:
-        """Recover a persisted running job whose exact Codex session is terminal."""
+        """Recover a durable job whose exact Codex session is terminal.
+
+        Terminal cancellation recovery is limited to the server-shutdown
+        record and requires session completion evidence timestamped before the
+        cancellation.  This keeps user cancellation and ambiguous late
+        completion fail-closed.
+        """
+        is_shutdown_cancel = (
+            getattr(job, "state", None) == JobState.CANCELLED
+            and str(getattr(job, "error", "") or "")
+            == SERVER_SHUTDOWN_CANCELLATION_ERROR
+            and getattr(job, "terminal_source", None) == "manager_cancellation"
+        )
         if getattr(job, "state", None) in {
             JobState.COMPLETED,
             JobState.FAILED,
-            JobState.CANCELLED,
-        }:
+        } or (
+            getattr(job, "state", None) == JobState.CANCELLED
+            and not is_shutdown_cancel
+        ):
             return False
         options = getattr(job, "options", None)
         resume_session_id = (
@@ -401,7 +427,6 @@ class JobExecutor:
             if current.state in {
                 JobState.COMPLETED,
                 JobState.FAILED,
-                JobState.CANCELLED,
             }:
                 self.job_manager.transition_job_terminal(
                     job.job_id,
@@ -414,20 +439,36 @@ class JobExecutor:
             result = self._result_from_session_message(
                 snapshot.final_message, result_file
             )
-            # Recovery has no surviving in-process lease. Establish the
-            # turnstile before terminal state is visible to another process.
-            if job.job_id not in self._terminal_cleanup_completed:
-                self._ensure_cleanup_repo_block(job)
-            transitioned = self._transition_job_terminal_with_cleanup(
-                job.job_id,
-                JobState.COMPLETED,
-                result=result,
-                terminal_source=snapshot.source,
-                terminal_observed_at=snapshot.observed_at or time.time(),
-                wrapper_cleanup_outcome="cleanup_pending",
-                last_heartbeat_at=time.time(),
-                last_event="session_task_complete_recovered",
-            )
+            if current.state == JobState.CANCELLED:
+                if not is_shutdown_cancel:
+                    return False
+                recovered = self.job_manager.recover_shutdown_completed_job(
+                    job.job_id,
+                    result=result,
+                    terminal_source=snapshot.source,
+                    terminal_observed_at=snapshot.observed_at or time.time(),
+                    wrapper_cleanup_outcome="cleanup_pending",
+                    last_heartbeat_at=time.time(),
+                    last_event="session_task_complete_recovered",
+                )
+                if not recovered:
+                    return False
+                transitioned = True
+            else:
+                # Recovery has no surviving in-process lease. Establish the
+                # turnstile before terminal state is visible to another process.
+                if job.job_id not in self._terminal_cleanup_completed:
+                    self._ensure_cleanup_repo_block(job)
+                transitioned = self._transition_job_terminal_with_cleanup(
+                    job.job_id,
+                    JobState.COMPLETED,
+                    result=result,
+                    terminal_source=snapshot.source,
+                    terminal_observed_at=snapshot.observed_at or time.time(),
+                    wrapper_cleanup_outcome="cleanup_pending",
+                    last_heartbeat_at=time.time(),
+                    last_event="session_task_complete_recovered",
+                )
         if not transitioned:
             return False
 
