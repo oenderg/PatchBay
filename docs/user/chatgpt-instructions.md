@@ -26,11 +26,11 @@ For a completed receipt, use the status response's `report` and
 `report_offset`; never ask for raw CLI output. A private target configured with
 `output_format: markdown` will show the same ordinary Markdown report in its
 Desktop transcript.
-When a user explicitly authorizes a different sandbox for one turn, pass
-`permission_mode` only with a value the private alias is known to allow:
-`read-only`, `workspace-write`, or Codex's canonical `danger-full-access`.
-Omitting it uses the alias default. The response reports requested/effective
-mode; the public call cannot change the alias policy for later turns.
+For the private `MTP Luna` alias, send the ordinary target, receipt, and
+prompt fields without a sandbox override. Its local policy supplies the
+default `danger-full-access` mode, and status reports the effective mode for
+the receipt. Do not ask Web Sol to change that local policy; it remains a
+PatchBay operator setting.
 
 In Hub/edge deployments, the same copied Server URL exposes the exact 31-tool
 Hub manager surface instead of the older single-machine `codex_*` surface. At

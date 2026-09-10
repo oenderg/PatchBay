@@ -90,11 +90,11 @@ later chunks. The public prompt schema allows up to 16,000 Unicode characters;
 the default private alias limit is 12,000 and can be lowered per target. Start
 waits up to three seconds for an immediate CLI startup failure before leaving
 a healthy long turn asynchronous.
-For a one-turn sandbox override, pass `permission_mode` only after explicit
-user authorization and only when the private alias allowlist permits the
-canonical value (`read-only`, `workspace-write`, or `danger-full-access`).
-Omitting it uses the alias default; the response reports requested/effective
-mode and the setting resets to the alias default on the next dispatch.
+For Web Sol calls to the private `MTP Luna` alias, omit sandbox overrides and
+send the ordinary target, receipt, and prompt fields. Its private local
+policy supplies the default `danger-full-access` mode; status reports the
+effective mode for each receipt. Other aliases may retain their own private
+operator policy.
 
 OpenAI's Apps SDK docs describe the ChatGPT connector flow as: enable Developer Mode, create a connector, paste an HTTPS `/mcp` URL, then open a new chat and add the connector from the `+` / More menu. References:
 
